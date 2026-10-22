@@ -27,6 +27,7 @@ final class AppStore {
     // Session
     private(set) var session: Session = .unknown
     private(set) var viewerID: String?
+    private(set) var viewerUsername: String?
 
     // Navigation / presentation
     var layoutMode: AppLayoutMode = .hybrid {
@@ -38,7 +39,9 @@ final class AppStore {
     private(set) var tab: InstagramTab = .home
     var isInspectorShown = false
     var profileUserID: String?
+    var profileUsername: String?
     var storyViewer: IGStoryTray?
+    var isLoadingStorySlides = false
     var detailPost: IGPost?
     var isShowingLogin = false
 
@@ -58,9 +61,22 @@ final class AppStore {
     private(set) var activity: [IGActivity] = []
     private(set) var activityPhase: Phase = .idle
 
+    private(set) var notes: [IGNote] = []
+    private(set) var directThreads: [IGDirectThread] = []
+    private(set) var directPhase: Phase = .idle
+    var selectedThreadID: String?
+    private(set) var isSendingDirectMessage = false
+
     private(set) var profile: IGUser?
     private(set) var profilePosts: [IGPost] = []
+    private(set) var profileHighlights: [IGStoryTray] = []
     private(set) var profilePhase: Phase = .idle
+
+    init() {
+        client.onNetworkEvent = { [weak self] event in
+            self?.handleNetworkEvent(event)
+        }
+    }
 
     // MARK: Session
 
@@ -71,6 +87,10 @@ final class AppStore {
         }
         viewerID = id
         await client.prepare()
+        client.setNetworkTap(pattern: "/api/|/graphql")
+        if let detected = await client.detectViewerUsername() {
+            viewerUsername = detected
+        }
         session = .signedIn
     }
 
@@ -85,7 +105,126 @@ final class AppStore {
         explore = []; explorePhase = .idle
         reels = []; reelsPhase = .idle
         activity = []; activityPhase = .idle
-        profile = nil; profilePosts = []; profilePhase = .idle
+        notes = []; directThreads = []; directPhase = .idle; selectedThreadID = nil
+        profile = nil; profilePosts = []; profileHighlights = []; profilePhase = .idle
+    }
+
+    // MARK: Network Tap Handling
+
+    private func handleNetworkEvent(_ event: InstagramClient.NetworkEvent) {
+        guard (200..<300).contains(event.status),
+              let data = event.body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        let opName = event.label.components(separatedBy: " #").first ?? ""
+
+        switch opName {
+        case "IGDInboxTrayQuery", "PolarisProfileNoteBubbleQuery":
+            let parsed = IGJSON.notes(from: json)
+            if !parsed.isEmpty {
+                notes = parsed
+                if let own = parsed.first(where: { $0.user.id == viewerID }) {
+                    viewerUsername = own.user.username
+                }
+            }
+
+        case "PolarisDirectInboxQuery":
+            let parsed = IGJSON.directThreads(from: json)
+            if !parsed.isEmpty {
+                mergeThreads(parsed)
+                if selectedThreadID == nil {
+                    selectedThreadID = directThreads.first?.id
+                }
+                directPhase = .loaded
+            } else if directPhase == .loading {
+                directPhase = .loaded
+            }
+
+        case "IGDThreadDetailQuery":
+            if let detailed = IGJSON.directThreadDetail(from: json) {
+                mergeDetailedThread(detailed)
+            }
+
+        case "PolarisProfilePageContentQuery":
+            if let dataDict = json["data"] as? [String: Any],
+               let userDict = dataDict["user"] as? [String: Any],
+               let parsedUser = IGJSON.user(userDict) {
+                let targetUsername = (profileUsername ?? viewerUsername)?.lowercased()
+                let targetID = profileUserID ?? viewerID
+                if parsedUser.id == targetID || parsedUser.username.lowercased() == targetUsername || profile == nil {
+                    profile = parsedUser
+                    if parsedUser.id == viewerID {
+                        viewerUsername = parsedUser.username
+                    }
+                    profilePhase = .loaded
+                }
+            }
+
+        case "PolarisProfilePostsQuery":
+            if let dataDict = json["data"] as? [String: Any],
+               let conn = dataDict["xdt_api__v1__feed__user_timeline_graphql_connection"] as? [String: Any],
+               let edges = conn["edges"] as? [[String: Any]] {
+                let posts = edges.compactMap { ($0["node"] as? [String: Any]).flatMap(IGJSON.post) }
+                if !posts.isEmpty {
+                    let owner = posts.first?.user
+                    let targetUsername = (profileUsername ?? viewerUsername)?.lowercased()
+                    let targetID = profileUserID ?? viewerID
+                    if owner?.id == targetID || owner?.username.lowercased() == targetUsername || profilePosts.isEmpty {
+                        profilePosts = posts
+                        if profile == nil, let owner {
+                            profile = owner
+                        }
+                        profilePhase = .loaded
+                    }
+                }
+            }
+
+        case "PolarisProfileStoryHighlightsTrayContentQuery":
+            let parsed = IGJSON.highlights(from: json, fallbackUser: profile)
+            if !parsed.isEmpty {
+                profileHighlights = parsed
+            }
+
+        default:
+            if event.url.contains("reels_media") {
+                if let current = storyViewer {
+                    let slides = IGJSON.storySlides(from: json, reelID: current.id)
+                    if !slides.isEmpty {
+                        applyStorySlides(slides, for: current.id)
+                    }
+                }
+            }
+        }
+    }
+
+    private func mergeThreads(_ incoming: [IGDirectThread]) {
+        var existingByID: [String: IGDirectThread] = Dictionary(uniqueKeysWithValues: directThreads.map { ($0.id, $0) })
+        var ordered: [IGDirectThread] = []
+        for var item in incoming {
+            if let prev = existingByID[item.id] ?? directThreads.first(where: { $0.threadFBID == item.threadFBID }) {
+                if item.messages.count < prev.messages.count {
+                    item.messages = prev.messages
+                }
+            }
+            ordered.append(item)
+            existingByID.removeValue(forKey: item.id)
+        }
+        directThreads = ordered
+    }
+
+    private func mergeDetailedThread(_ detailed: IGDirectThread) {
+        if let idx = directThreads.firstIndex(where: { $0.id == detailed.id || $0.threadFBID == detailed.threadFBID }) {
+            var updated = directThreads[idx]
+            if !detailed.messages.isEmpty {
+                updated.messages = detailed.messages
+            }
+            if !detailed.snippet.isEmpty {
+                updated.snippet = detailed.snippet
+            }
+            directThreads[idx] = updated
+        } else {
+            directThreads.append(detailed)
+        }
     }
 
     // MARK: Navigation
@@ -93,7 +232,11 @@ final class AppStore {
     func select(_ newTab: InstagramTab) {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         withAnimation(.snappy(duration: 0.25)) {
-            if newTab == .profile && tab != .profile { profileUserID = nil; profilePhase = .idle }
+            if newTab == .profile && tab != .profile {
+                profileUserID = nil
+                profileUsername = nil
+                profilePhase = .idle
+            }
             tab = newTab
         }
     }
@@ -101,18 +244,24 @@ final class AppStore {
     func openProfile(of user: IGUser) {
         detailPost = nil
         storyViewer = nil
-        profileUserID = user.id == viewerID ? nil : user.id
+        let isOwn = user.id == viewerID
+        profileUserID = isOwn ? nil : user.id
+        profileUsername = isOwn ? viewerUsername ?? user.username : user.username
         profilePhase = .idle
-        profile = nil
+        profile = user
         profilePosts = []
+        profileHighlights = []
         withAnimation(.snappy(duration: 0.25)) { tab = .profile }
+        Task { await loadProfile() }
     }
 
     func closeOtherProfile() {
         profileUserID = nil
+        profileUsername = nil
         profilePhase = .idle
         profile = nil
         profilePosts = []
+        profileHighlights = []
     }
 
     func ensureLoaded(_ tab: InstagramTab) async {
@@ -126,10 +275,10 @@ final class AppStore {
             if reelsPhase == .idle { await loadReels() }
         case .activity:
             if activityPhase == .idle { await loadActivity() }
+        case .direct:
+            if directPhase == .idle { await loadDirect() }
         case .profile:
             if profilePhase == .idle { await loadProfile() }
-        case .direct:
-            break
         }
     }
 
@@ -140,8 +289,8 @@ final class AppStore {
         case .explore: await loadExplore()
         case .reels: await loadReels()
         case .activity: await loadActivity()
+        case .direct: await loadDirect()
         case .profile: await loadProfile()
-        case .direct: break
         }
     }
 
@@ -188,11 +337,17 @@ final class AppStore {
             if let trayJSON = try? await fetch("/api/v1/feed/reels_tray/") {
                 let tray = (trayJSON["tray"] as? [[String: Any]]) ?? []
                 stories = tray.compactMap(IGJSON.storyTray)
+                if let ownTray = stories.first(where: { $0.user.id == viewerID }) {
+                    viewerUsername = ownTray.user.username
+                }
             }
             let json = try await fetch("/api/v1/feed/timeline/", method: "POST", body: "reason=cold_start_fetch&is_pull_to_refresh=0")
             feed = Self.feedPosts(from: json)
             feedCursor = IGJSON.string(json["next_max_id"])
             feedPhase = .loaded
+            if viewerUsername == nil, let detected = await client.detectViewerUsername() {
+                viewerUsername = detected
+            }
         } catch {
             feedPhase = .failed(message(for: error))
         }
@@ -222,6 +377,57 @@ final class AppStore {
             guard let media = wrapper["media_or_ad"] as? [String: Any],
                   media["ad_id"] == nil, media["injected"] == nil else { return nil }
             return IGJSON.post(media)
+        }
+    }
+
+    // MARK: Stories (own + other people's stories + highlights)
+
+    func openStory(_ tray: IGStoryTray) {
+        markStorySeen(tray.id)
+        storyViewer = tray
+        if tray.slides.isEmpty {
+            Task { await loadStorySlides(for: tray) }
+        }
+    }
+
+    func loadStorySlides(for tray: IGStoryTray) async {
+        isLoadingStorySlides = true
+        defer { isLoadingStorySlides = false }
+
+        do {
+            let json = try await fetch(
+                "/api/v1/feed/reels_media/",
+                method: "POST",
+                body: "reel_ids=\(encode(tray.id))"
+            )
+            let slides = IGJSON.storySlides(from: json, reelID: tray.id)
+            if !slides.isEmpty {
+                applyStorySlides(slides, for: tray.id)
+                return
+            }
+        } catch {
+            // Fallback to driving the hidden WebView to the story route so its own fetch triggers
+        }
+
+        _ = await client.navigate(to: "/stories/\(tray.user.username)/")
+        for _ in 0..<12 {
+            try? await Task.sleep(for: .milliseconds(350))
+            if let current = storyViewer, current.id == tray.id, !current.slides.isEmpty {
+                break
+            }
+        }
+    }
+
+    private func applyStorySlides(_ slides: [IGMediaItem], for trayID: String) {
+        if let index = stories.firstIndex(where: { $0.id == trayID }) {
+            stories[index].slides = slides
+        }
+        if let index = profileHighlights.firstIndex(where: { $0.id == trayID }) {
+            profileHighlights[index].slides = slides
+        }
+        if var current = storyViewer, current.id == trayID {
+            current.slides = slides
+            storyViewer = current
         }
     }
 
@@ -261,19 +467,150 @@ final class AppStore {
         }
     }
 
-    func loadProfile() async {
-        guard profilePhase != .loading, let id = profileUserID ?? viewerID else { return }
-        profilePhase = .loading
-        do {
-            let info = try await fetch("/api/v1/users/\(id)/info/")
-            if let userDict = info["user"] as? [String: Any] {
-                profile = IGJSON.user(userDict)
+    // MARK: Direct Messages & Notes
+
+    func loadDirect() async {
+        guard directPhase != .loading else { return }
+        directPhase = .loading
+        _ = await client.navigate(to: "/direct/inbox/")
+
+        for _ in 0..<24 {
+            try? await Task.sleep(for: .milliseconds(400))
+            if !directThreads.isEmpty {
+                directPhase = .loaded
+                return
             }
-            let feedJSON = try await fetch("/api/v1/feed/user/\(id)/?count=18")
-            profilePosts = ((feedJSON["items"] as? [[String: Any]]) ?? []).compactMap(IGJSON.post)
+        }
+        if directPhase == .loading {
+            directPhase = directThreads.isEmpty ? .failed("Mesaj kutusu yüklenemedi. Yeniden deneyin.") : .loaded
+        }
+    }
+
+    var selectedThread: IGDirectThread? {
+        guard let id = selectedThreadID else { return directThreads.first }
+        return directThreads.first(where: { $0.id == id }) ?? directThreads.first
+    }
+
+    func selectThread(_ thread: IGDirectThread) {
+        selectedThreadID = thread.id
+        if let idx = directThreads.firstIndex(where: { $0.id == thread.id }) {
+            directThreads[idx].isUnread = false
+        }
+        Task {
+            await client.openDirectThread(
+                threadID: thread.id,
+                title: thread.title,
+                username: thread.users.first?.username
+            )
+        }
+    }
+
+    func sendDirectMessage(text: String, in thread: IGDirectThread) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isSendingDirectMessage else { return false }
+        isSendingDirectMessage = true
+        defer { isSendingDirectMessage = false }
+
+        await client.openDirectThread(
+            threadID: thread.id,
+            title: thread.title,
+            username: thread.users.first?.username
+        )
+        try? await Task.sleep(for: .milliseconds(350))
+
+        let sent = await client.sendDirectMessage(text: trimmed)
+        if sent, let idx = directThreads.firstIndex(where: { $0.id == thread.id }) {
+            let optimistic = IGDirectMessage(
+                id: UUID().uuidString,
+                senderFBID: thread.viewerFBID,
+                senderUsername: viewerUsername,
+                senderAvatarURL: nil,
+                text: trimmed,
+                timestamp: .now,
+                isFromViewer: true
+            )
+            directThreads[idx].messages.append(optimistic)
+            directThreads[idx].snippet = trimmed
+            directThreads[idx].lastActivityAt = .now
+        }
+        return sent
+    }
+
+    // MARK: Profile
+
+    func loadProfile() async {
+        guard profilePhase != .loading else { return }
+        profilePhase = .loading
+
+        let targetID = profileUserID ?? viewerID
+        var targetUsername = profileUsername ?? (targetID == viewerID ? viewerUsername : nil)
+
+        if targetUsername == nil, let id = targetID {
+            targetUsername = stories.first(where: { $0.user.id == id })?.user.username
+                ?? feed.first(where: { $0.user.id == id })?.user.username
+                ?? notes.first(where: { $0.user.id == id })?.user.username
+        }
+        if targetUsername == nil && targetID == viewerID {
+            targetUsername = await client.detectViewerUsername()
+            if let targetUsername { viewerUsername = targetUsername }
+        }
+
+        if let username = targetUsername, !username.isEmpty {
+            _ = await client.navigate(to: "/\(username)/")
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(400))
+                if profile?.followerCount != nil && !profilePosts.isEmpty {
+                    profilePhase = .loaded
+                    return
+                }
+            }
+        }
+
+        // Fallback to user feed endpoint if GraphQL tap hasn't populated posts yet
+        if let id = targetID {
+            if let feedJSON = try? await fetch("/api/v1/feed/user/\(id)/?count=18") {
+                let items = ((feedJSON["items"] as? [[String: Any]]) ?? []).compactMap(IGJSON.post)
+                if !items.isEmpty {
+                    profilePosts = items
+                    if profile == nil {
+                        profile = items.first?.user
+                    }
+                }
+                if let userDict = feedJSON["user"] as? [String: Any], let parsed = IGJSON.user(userDict), profile == nil {
+                    profile = parsed
+                }
+            }
+        }
+
+        if profile != nil || !profilePosts.isEmpty {
             profilePhase = .loaded
-        } catch {
-            profilePhase = .failed(message(for: error))
+        } else {
+            profilePhase = .failed("Profil bilgileri alınamadı. Birkaç saniye sonra yenileyin.")
+        }
+    }
+
+    func toggleFollow(_ user: IGUser) {
+        guard let current = user.isFollowing else { return }
+        let target = !current
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        if profile?.id == user.id {
+            profile?.isFollowing = target
+            if let count = profile?.followerCount {
+                profile?.followerCount = max(0, count + (target ? 1 : -1))
+            }
+        }
+        Task {
+            do {
+                _ = try await fetch(
+                    "/api/v1/friendships/\(target ? "create" : "destroy")/\(user.id)/",
+                    method: "POST",
+                    body: "user_id=\(encode(user.id))"
+                )
+            } catch {
+                if profile?.id == user.id {
+                    profile?.isFollowing = current
+                }
+            }
         }
     }
 
@@ -340,9 +677,5 @@ final class AppStore {
 
     func markStorySeen(_ id: String) {
         if let index = stories.firstIndex(where: { $0.id == id }) { stories[index].hasUnseen = false }
-    }
-
-    func openMessagesInBrowser() {
-        if let url = URL(string: "https://www.instagram.com/direct/inbox/") { NSWorkspace.shared.open(url) }
     }
 }
