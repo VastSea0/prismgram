@@ -70,17 +70,13 @@ struct AvatarView: View {
                     .frame(width: size + gap + stroke, height: size + gap + stroke)
             }
 
-            AsyncImage(url: url) { phase in
-                if case .success(let image) = phase {
-                    image.resizable().scaledToFill()
-                } else {
-                    Circle().fill(.quaternary)
-                        .overlay {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: size * 0.42))
-                                .foregroundStyle(.secondary)
-                        }
-                }
+            CachedImage(url: url, maxPixelSize: size * 3) { _ in
+                Circle().fill(.quaternary)
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: size * 0.42))
+                            .foregroundStyle(.secondary)
+                    }
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
@@ -93,18 +89,14 @@ struct AvatarView: View {
 
 struct RemoteImage: View {
     let url: URL?
+    var maxPixelSize: CGFloat = 1080
 
     var body: some View {
-        AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.2))) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().scaledToFill()
-            case .failure:
-                Rectangle().fill(.quaternary)
-                    .overlay { Image(systemName: "photo").foregroundStyle(.secondary) }
-            default:
-                Rectangle().fill(.quaternary.opacity(0.6))
-            }
+        CachedImage(url: url, maxPixelSize: maxPixelSize) { failed in
+            Rectangle().fill(.quaternary.opacity(failed ? 1 : 0.6))
+                .overlay {
+                    if failed { Image(systemName: "photo").foregroundStyle(.secondary) }
+                }
         }
     }
 }
@@ -621,7 +613,7 @@ struct MediaGridTile: View {
             Color.clear
                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
                 .overlay {
-                    RemoteImage(url: post.items.first?.thumbURL)
+                    RemoteImage(url: post.items.first?.thumbURL, maxPixelSize: 480)
                         .scaleEffect(isHovered ? 1.03 : 1.0)
                         .animation(.easeOut(duration: 0.22), value: isHovered)
                 }
@@ -804,7 +796,7 @@ struct ActivityView: View {
                 }
                 Spacer(minLength: 6)
                 if let thumb = item.thumbURL {
-                    RemoteImage(url: thumb)
+                    RemoteImage(url: thumb, maxPixelSize: 128)
                         .frame(width: 42, height: 42)
                         .clipShape(.rect(cornerRadius: 6))
                 }
