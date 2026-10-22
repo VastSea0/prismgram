@@ -12,8 +12,8 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 | Browse feed, infinite scroll | ✅ | |
 | "For you" / "Following" switch | ❌ | |
 | Carousel posts, inline video | ✅ | |
-| Like, double-tap to like | 🟡 | Written, not yet exercised on a real account |
-| Save / unsave | 🟡 | Same as above |
+| Like, double-tap to like | ✅ | Optimistic toggle with rollback on failure |
+| Save / unsave | ✅ | |
 | Open post on instagram.com | ✅ | |
 | Share a post to a chat | ❌ | |
 | Follow / unfollow from a post | ❌ | |
@@ -22,8 +22,8 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Story tray | 🟡 | Only the viewer's own story has slides today |
-| Watch other people's stories | ❌ | Tray items arrive without slides |
+| Story tray | ✅ | Full tray from `reels_tray` |
+| Watch other people's stories | ✅ | Loaded on demand via `POST /api/v1/feed/reels_media/` with WebView route fallback |
 | Reply to / react to a story | ❌ | |
 | Create a story | ❌ | |
 
@@ -31,8 +31,8 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Read comments | 🟡 | |
-| Post a comment | 🟡 | |
+| Read comments | ✅ | |
+| Post a comment | ✅ | |
 | Reply to / like a comment | ❌ | |
 
 ## Explore and search
@@ -47,38 +47,38 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Vertical reels feed | 🟡 | |
-| Like / save / comment | 🟡 | |
+| Vertical reels feed | ✅ | Native `AVPlayerView` paging |
+| Like / save / comment | ✅ | |
 | Follow the creator | ❌ | |
 
 ## Messages
 
 | Feature | Status | Notes |
 |---|---|---|
-| Inbox | ❌ | |
-| Read and send messages | ❌ | |
-| Notes | ❌ | |
+| Inbox | ✅ | Driven by hidden WebView `/direct/inbox/` (`PolarisDirectInboxQuery`) |
+| Read and send messages | ✅ | Thread detail via `IGDThreadDetailQuery`, sending via hidden WebView composer |
+| Notes | ✅ | Native Notes bar (`IGDInboxTrayQuery`, text + music metadata) |
 | Message requests | ❌ | |
-| Start a new chat, group chats | ❌ | |
+| Start a new chat, group chats | 🟡 | Existing group chats work; starting a new chat not yet covered |
 | Photos, reactions, replies, unsend | ❌ | |
 
 ## Notifications
 
 | Feature | Status | Notes |
 |---|---|---|
-| Activity list | 🟡 | |
+| Activity list | ✅ | Sidebar inspector (`⌥⌘I`) or dedicated tab |
 | Follow requests | ❌ | |
 
 ## Profile
 
 | Feature | Status | Notes |
 |---|---|---|
-| Own profile header and grid | ❌ | Endpoint was rejected during testing |
-| Other people's profiles | ❌ | |
-| Follow / unfollow, message | ❌ | |
+| Own profile header and grid | ✅ | Driven by hidden WebView `/<username>/` (`PolarisProfilePageContentQuery` & `PolarisProfilePostsQuery`) |
+| Other people's profiles | ✅ | Click any author in feed, stories, reels, notes, or messages |
+| Follow / unfollow | ✅ | Native button on other users' profiles |
 | Reels, tagged and saved tabs | ❌ | |
 | Followers / following lists | ❌ | |
-| Highlights | ❌ | |
+| Highlights | ✅ | Native Highlights bar (`PolarisProfileStoryHighlightsTrayContentQuery`) + StoryViewer |
 | Edit profile, settings, log out | ❌ | |
 
 ## Creating

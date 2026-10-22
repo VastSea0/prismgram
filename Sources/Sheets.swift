@@ -10,7 +10,14 @@ struct StoryViewer: View {
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
 
-    private var slide: IGMediaItem? { tray.slides[safe: index] }
+    private var activeTray: IGStoryTray {
+        if let latest = store.storyViewer, latest.id == tray.id {
+            return latest
+        }
+        return tray
+    }
+
+    private var slide: IGMediaItem? { activeTray.slides[safe: index] }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -26,6 +33,15 @@ struct StoryViewer: View {
                     }
                 }
                 .id(slide.id)
+            } else if store.isLoadingStorySlides {
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("Hikaye yüklenemedi", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             HStack(spacing: 0) {
@@ -34,19 +50,37 @@ struct StoryViewer: View {
             }
 
             VStack(spacing: 10) {
-                HStack(spacing: 4) {
-                    ForEach(tray.slides.indices, id: \.self) { position in
-                        Capsule()
-                            .fill(position <= index ? Color.white : Color.white.opacity(0.35))
-                            .frame(height: 3)
+                if !activeTray.slides.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(activeTray.slides.indices, id: \.self) { position in
+                            Capsule()
+                                .fill(position <= index ? Color.white : Color.white.opacity(0.35))
+                                .frame(height: 3)
+                        }
                     }
                 }
 
                 HStack(spacing: 10) {
-                    AvatarView(url: tray.user.avatarURL, size: 30)
-                    Text(tray.user.username)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                    Button {
+                        let user = activeTray.user
+                        dismiss()
+                        store.openProfile(of: user)
+                    } label: {
+                        HStack(spacing: 10) {
+                            AvatarView(url: activeTray.user.avatarURL, size: 30)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(activeTray.title ?? activeTray.user.username)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                if activeTray.title != nil {
+                                    Text("@\(activeTray.user.username)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white.opacity(0.75))
+                                }
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
@@ -61,7 +95,8 @@ struct StoryViewer: View {
             )
         }
         .frame(width: 400, height: 710)
-        .task(id: index) {
+        .task(id: "\(activeTray.slides.count)-\(index)") {
+            guard !activeTray.slides.isEmpty else { return }
             try? await Task.sleep(for: .seconds(slide?.videoURL == nil ? 6 : 12))
             if !Task.isCancelled { step(1) }
         }
@@ -69,10 +104,11 @@ struct StoryViewer: View {
     }
 
     private func step(_ delta: Int) {
+        guard !activeTray.slides.isEmpty else { return }
         let next = index + delta
         if next < 0 {
             return
-        } else if next >= tray.slides.count {
+        } else if next >= activeTray.slides.count {
             dismiss()
         } else {
             index = next

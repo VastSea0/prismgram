@@ -342,10 +342,9 @@ struct StoryTray: View {
     var body: some View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 14) {
-                ForEach(store.stories.filter { !$0.slides.isEmpty }) { tray in
+                ForEach(store.stories) { tray in
                     Button {
-                        store.markStorySeen(tray.id)
-                        store.storyViewer = tray
+                        store.openStory(tray)
                     } label: {
                         VStack(spacing: 6) {
                             AvatarView(url: tray.user.avatarURL, size: 54, ring: tray.hasUnseen ? .unseen : .seen)
@@ -495,7 +494,7 @@ struct ReelPage: View {
     }
 }
 
-// MARK: - Activity & Messages
+// MARK: - Activity
 
 struct ActivityView: View {
     @Bindable var store: AppStore
@@ -530,17 +529,282 @@ struct ActivityView: View {
     }
 }
 
+// MARK: - Direct Messages & Notes
+
 struct MessagesView: View {
+    @Bindable var store: AppStore
+    @State private var phoneOpenThread: IGDirectThread?
+
+    var body: some View {
+        Group {
+            if store.layoutMode == .phone {
+                NavigationStack {
+                    threadList(isPhone: true)
+                        .navigationDestination(item: $phoneOpenThread) { thread in
+                            DirectConversationView(threadID: thread.id, store: store)
+                        }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    threadList(isPhone: false)
+                        .frame(width: 310)
+                    Divider()
+                    if let thread = store.selectedThread {
+                        DirectConversationView(threadID: thread.id, store: store)
+                            .id(thread.id)
+                    } else {
+                        ContentUnavailableView(
+                            "Sohbet Seçin",
+                            systemImage: "paperplane",
+                            description: Text("Mesajları görüntülemek veya yanıtlamak için soldaki listeden bir kişi seçin.")
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+        }
+        .overlay {
+            LoadStateView(phase: store.directPhase, isEmpty: store.directThreads.isEmpty && store.notes.isEmpty, emptyTitle: "Mesaj kutusu boş", emptySymbol: "paperplane") {
+                Task { await store.refresh(.direct) }
+            }
+        }
+    }
+
+    private func threadList(isPhone: Bool) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if !store.notes.isEmpty {
+                    NotesBar(store: store)
+                    Divider()
+                }
+
+                ForEach(store.directThreads) { thread in
+                    let isSelected = !isPhone && store.selectedThread?.id == thread.id
+                    Button {
+                        store.selectThread(thread)
+                        if isPhone { phoneOpenThread = thread }
+                    } label: {
+                        HStack(spacing: 12) {
+                            AvatarView(url: thread.users.first?.avatarURL, size: 44)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 4) {
+                                    Text(thread.title)
+                                        .font(.subheadline.weight(thread.isUnread ? .bold : .semibold))
+                                        .lineLimit(1)
+                                    if thread.isPinned {
+                                        Image(systemName: "pin.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text(thread.lastActivityAt, format: .relative(presentation: .named))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(thread.snippet.isEmpty ? "Mesajları görüntüle" : thread.snippet)
+                                    .font(.caption)
+                                    .foregroundStyle(thread.isUnread ? .primary : .secondary)
+                                    .lineLimit(1)
+                            }
+                            if thread.isUnread {
+                                Circle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 8, height: 8)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .contentShape(.rect)
+                        .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
+                    }
+                    .buttonStyle(.plain)
+                    Divider()
+                }
+            }
+        }
+    }
+}
+
+struct NotesBar: View {
     @Bindable var store: AppStore
 
     var body: some View {
-        ContentUnavailableView {
-            Label("Mesajlar", systemImage: "paperplane")
-        } description: {
-            Text("Instagram, doğrudan mesajlar için uygulama dışı erişime izin veren bir arayüz sunmuyor. Mesajlarınız tarayıcıda açılır.")
-        } actions: {
-            Button("Tarayıcıda Aç") { store.openMessagesInBrowser() }
-                .buttonStyle(.glassProminent)
+        ScrollView(.horizontal) {
+            LazyHStack(alignment: .bottom, spacing: 14) {
+                ForEach(store.notes) { note in
+                    Button {
+                        store.openProfile(of: note.user)
+                    } label: {
+                        VStack(spacing: 4) {
+                            VStack(spacing: 2) {
+                                if !note.text.isEmpty {
+                                    Text(note.text)
+                                        .font(.caption2)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.center)
+                                }
+                                if let music = note.musicTitle, !music.isEmpty {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "music.note")
+                                            .font(.system(size: 8, weight: .bold))
+                                        Text(music)
+                                            .font(.system(size: 9, weight: .medium))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .frame(maxWidth: 92)
+                            .background(.quaternary.opacity(0.65), in: .rect(cornerRadius: 12))
+
+                            AvatarView(url: note.user.avatarURL, size: 46)
+
+                            Text(note.user.id == store.viewerID ? "Notun" : note.user.username)
+                                .font(.caption2)
+                                .lineLimit(1)
+                                .frame(width: 72)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+
+struct DirectConversationView: View {
+    let threadID: String
+    @Bindable var store: AppStore
+    @State private var draft = ""
+    @State private var sendFailed = false
+
+    private var thread: IGDirectThread? {
+        store.directThreads.first(where: { $0.id == threadID })
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let thread {
+                conversationHeader(thread)
+                Divider()
+                messagesList(thread)
+                Divider()
+                composer(thread)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private func conversationHeader(_ thread: IGDirectThread) -> some View {
+        HStack(spacing: 10) {
+            AvatarView(url: thread.users.first?.avatarURL, size: 32)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(thread.title).font(.subheadline.weight(.semibold))
+                if let username = thread.users.first?.username {
+                    Text("@\(username)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if let user = thread.users.first {
+                Button("Profili Aç") { store.openProfile(of: user) }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func messagesList(_ thread: IGDirectThread) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    if thread.messages.isEmpty {
+                        Text("Mesaj geçmişi yükleniyor veya henüz mesaj yok.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 32)
+                    }
+                    ForEach(thread.messages) { message in
+                        HStack(alignment: .bottom, spacing: 8) {
+                            if message.isFromViewer {
+                                Spacer(minLength: 48)
+                            } else {
+                                AvatarView(url: message.senderAvatarURL ?? thread.users.first?.avatarURL, size: 24)
+                            }
+
+                            VStack(alignment: message.isFromViewer ? .trailing : .leading, spacing: 3) {
+                                Text(message.text)
+                                    .font(.subheadline)
+                                    .foregroundStyle(message.isFromViewer ? Color.white : Color.primary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        message.isFromViewer ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary),
+                                        in: .rect(cornerRadius: 16)
+                                    )
+
+                                Text(message.timestamp, format: .dateTime.hour().minute())
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if !message.isFromViewer {
+                                Spacer(minLength: 48)
+                            }
+                        }
+                        .id(message.id)
+                    }
+                }
+                .padding(16)
+            }
+            .onChange(of: thread.messages.count, initial: true) { _, _ in
+                if let lastID = thread.messages.last?.id {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        proxy.scrollTo(lastID, anchor: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
+    private func composer(_ thread: IGDirectThread) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if sendFailed {
+                Text("Mesaj gönderilemedi. Yeniden deneyin.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack(spacing: 8) {
+                TextField("Mesaj yaz…", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { send(in: thread) }
+                Button("Gönder") { send(in: thread) }
+                    .buttonStyle(.glassProminent)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSendingDirectMessage)
+            }
+        }
+        .padding(12)
+    }
+
+    private func send(in thread: IGDirectThread) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !store.isSendingDirectMessage else { return }
+        sendFailed = false
+        Task {
+            let ok = await store.sendDirectMessage(text: text, in: thread)
+            if ok {
+                draft = ""
+            } else {
+                sendFailed = true
+            }
         }
     }
 }
@@ -554,16 +818,26 @@ struct ProfileView: View {
         ScrollView {
             VStack(spacing: 16) {
                 if let user = store.profile {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
                         HStack(spacing: 20) {
                             AvatarView(url: user.avatarURL, size: 84)
-                            HStack(spacing: 22) {
-                                stat(user.mediaCount, "gönderi")
-                                stat(user.followerCount, "takipçi")
-                                stat(user.followingCount, "takip")
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 22) {
+                                    stat(user.mediaCount ?? store.profilePosts.count, "gönderi")
+                                    stat(user.followerCount, "takipçi")
+                                    stat(user.followingCount, "takip")
+                                }
+                                if user.id != store.viewerID, let isFollowing = user.isFollowing {
+                                    Button(isFollowing ? "Takipten Çık" : "Takip Et") {
+                                        store.toggleFollow(user)
+                                    }
+                                    .buttonStyle(.glassProminent)
+                                    .controlSize(.small)
+                                }
                             }
                         }
-                        VStack(alignment: .leading, spacing: 3) {
+
+                        VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 4) {
                                 Text(user.fullName.isEmpty ? user.username : user.fullName)
                                     .font(.headline)
@@ -575,24 +849,83 @@ struct ProfileView: View {
                             if !user.biography.isEmpty {
                                 Text(user.biography).font(.subheadline)
                             }
+                            if let link = user.externalURL {
+                                Link(destination: link) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "link")
+                                        Text(link.host ?? link.absoluteString)
+                                            .lineLimit(1)
+                                    }
+                                    .font(.caption.weight(.medium))
+                                }
+                            }
+                        }
+
+                        if !store.profileHighlights.isEmpty {
+                            ScrollView(.horizontal) {
+                                LazyHStack(spacing: 14) {
+                                    ForEach(store.profileHighlights) { highlight in
+                                        Button {
+                                            store.openStory(highlight)
+                                        } label: {
+                                            VStack(spacing: 5) {
+                                                AvatarView(url: highlight.coverURL ?? user.avatarURL, size: 52, ring: .seen)
+                                                Text(highlight.title ?? "Öne Çıkan")
+                                                    .font(.caption2)
+                                                    .lineLimit(1)
+                                                    .frame(width: 64)
+                                            }
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            .scrollIndicators(.hidden)
                         }
                     }
                     .frame(maxWidth: 560, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 2)], spacing: 2) {
-                        ForEach(store.profilePosts) { post in
-                            Button { store.detailPost = post } label: {
-                                Color.clear
-                                    .aspectRatio(1, contentMode: .fit)
-                                    .overlay { RemoteImage(url: post.items.first?.thumbURL) }
-                                    .clipped()
+                    Divider()
+
+                    if store.profilePosts.isEmpty && user.isPrivate && user.isFollowing != true && user.id != store.viewerID {
+                        ContentUnavailableView(
+                            "Bu Hesap Gizli",
+                            systemImage: "lock.fill",
+                            description: Text("Fotoğraf ve videolarını görmek için bu hesabı takip edin.")
+                        )
+                        .padding(.top, 24)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 2)], spacing: 2) {
+                            ForEach(store.profilePosts) { post in
+                                Button { store.detailPost = post } label: {
+                                    Color.clear
+                                        .aspectRatio(1, contentMode: .fit)
+                                        .overlay { RemoteImage(url: post.items.first?.thumbURL) }
+                                        .overlay(alignment: .topTrailing) {
+                                            if post.isVideo {
+                                                Image(systemName: "play.fill")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.white)
+                                                    .shadow(radius: 2)
+                                                    .padding(6)
+                                            } else if post.items.count > 1 {
+                                                Image(systemName: "square.on.square")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.white)
+                                                    .shadow(radius: 2)
+                                                    .padding(6)
+                                            }
+                                        }
+                                        .clipped()
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(2)
                     }
-                    .padding(2)
                 }
             }
         }
