@@ -1,7 +1,36 @@
 import SwiftUI
 import AVKit
 
-// MARK: - Shared building blocks
+// MARK: - Brand & Shared Building Blocks
+
+struct PrismMark: View {
+    var size: CGFloat = 20
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(
+                    AngularGradient(
+                        colors: [
+                            Color(red: 0.98, green: 0.36, blue: 0.34),
+                            Color(red: 0.99, green: 0.68, blue: 0.24),
+                            Color(red: 0.30, green: 0.68, blue: 0.98),
+                            Color(red: 0.62, green: 0.36, blue: 0.98),
+                            Color(red: 0.96, green: 0.30, blue: 0.66),
+                            Color(red: 0.98, green: 0.36, blue: 0.34)
+                        ],
+                        center: .center
+                    ),
+                    lineWidth: size * 0.14
+                )
+                .frame(width: size, height: size)
+
+            Circle()
+                .fill(.primary.opacity(0.85))
+                .frame(width: size * 0.34, height: size * 0.34)
+        }
+    }
+}
 
 struct AvatarView: View {
     let url: URL?
@@ -11,24 +40,34 @@ struct AvatarView: View {
     enum Ring { case none, seen, unseen }
 
     var body: some View {
+        let gap: CGFloat = size >= 52 ? 6 : 4
+        let stroke: CGFloat = size >= 52 ? 2.4 : 1.8
+
         ZStack {
             switch ring {
             case .none:
                 EmptyView()
             case .seen:
-                Circle().strokeBorder(.quaternary, lineWidth: 1.5)
-                    .frame(width: size + 8, height: size + 8)
+                Circle()
+                    .strokeBorder(.tertiary.opacity(0.65), lineWidth: 1.2)
+                    .frame(width: size + gap + stroke, height: size + gap + stroke)
             case .unseen:
                 Circle()
                     .strokeBorder(
-                        LinearGradient(
-                            colors: [.orange, .pink, .purple],
-                            startPoint: .bottomLeading,
-                            endPoint: .topTrailing
+                        AngularGradient(
+                            colors: [
+                                Color(red: 0.99, green: 0.78, blue: 0.22),
+                                Color(red: 0.99, green: 0.38, blue: 0.24),
+                                Color(red: 0.92, green: 0.16, blue: 0.48),
+                                Color(red: 0.64, green: 0.20, blue: 0.86),
+                                Color(red: 0.92, green: 0.16, blue: 0.48),
+                                Color(red: 0.99, green: 0.78, blue: 0.22)
+                            ],
+                            center: .center
                         ),
-                        lineWidth: 2
+                        lineWidth: stroke
                     )
-                    .frame(width: size + 8, height: size + 8)
+                    .frame(width: size + gap + stroke, height: size + gap + stroke)
             }
 
             AsyncImage(url: url) { phase in
@@ -45,6 +84,9 @@ struct AvatarView: View {
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
+            .overlay {
+                Circle().strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+            }
         }
     }
 }
@@ -53,7 +95,7 @@ struct RemoteImage: View {
     let url: URL?
 
     var body: some View {
-        AsyncImage(url: url) { phase in
+        AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.2))) { phase in
             switch phase {
             case .success(let image):
                 image.resizable().scaledToFill()
@@ -61,7 +103,7 @@ struct RemoteImage: View {
                 Rectangle().fill(.quaternary)
                     .overlay { Image(systemName: "photo").foregroundStyle(.secondary) }
             default:
-                Rectangle().fill(.quaternary)
+                Rectangle().fill(.quaternary.opacity(0.6))
             }
         }
     }
@@ -145,51 +187,101 @@ struct LoadStateView: View {
     }
 }
 
-// MARK: - Post
+// MARK: - Post & Media Pager (Instagram iOS layout + double-tap heart burst)
 
 struct MediaPager: View {
     let items: [IGMediaItem]
+    @Binding var currentIndex: Int
     var onDoubleTap: () -> Void = {}
 
-    @State private var page: String?
+    @State private var pageID: String?
+    @State private var showHeartBurst = false
+    @State private var heartScale: CGFloat = 0.3
+    @State private var heartOpacity: Double = 0
 
     private var ratio: Double { items.first?.aspectRatio ?? 1 }
 
     var body: some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 0) {
-                ForEach(items) { item in
-                    Group {
-                        if let video = item.videoURL {
-                            InlineVideo(url: video)
-                        } else {
-                            RemoteImage(url: item.imageURL)
+        ZStack {
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    ForEach(items) { item in
+                        Group {
+                            if let video = item.videoURL {
+                                InlineVideo(url: video)
+                            } else {
+                                RemoteImage(url: item.imageURL)
+                            }
                         }
+                        .containerRelativeFrame(.horizontal)
+                        .aspectRatio(ratio, contentMode: .fit)
+                        .clipped()
+                        .id(item.id)
                     }
-                    .containerRelativeFrame(.horizontal)
-                    .aspectRatio(ratio, contentMode: .fit)
-                    .clipped()
-                    .id(item.id)
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.paging)
+            .scrollIndicators(.hidden)
+            .scrollPosition(id: $pageID)
+            .onChange(of: pageID) { _, newValue in
+                if let newValue, let idx = items.firstIndex(where: { $0.id == newValue }) {
+                    withAnimation(.spring(duration: 0.25)) {
+                        currentIndex = idx
+                    }
                 }
             }
-            .scrollTargetLayout()
-        }
-        .scrollTargetBehavior(.paging)
-        .scrollIndicators(.hidden)
-        .scrollPosition(id: $page)
-        .overlay(alignment: .topTrailing) {
-            if items.count > 1 {
-                let current = (items.firstIndex(where: { $0.id == page }) ?? 0) + 1
-                Text("\(current)/\(items.count)")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.black.opacity(0.55), in: .capsule)
-                    .padding(10)
+
+            if showHeartBurst {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 86, weight: .bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Color(red: 1.0, green: 0.24, blue: 0.38), Color(red: 0.98, green: 0.12, blue: 0.52)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
+                    .scaleEffect(heartScale)
+                    .opacity(heartOpacity)
+                    .allowsHitTesting(false)
             }
         }
-        .onTapGesture(count: 2, perform: onDoubleTap)
+        .overlay(alignment: .topTrailing) {
+            if items.count > 1 {
+                Text("\(currentIndex + 1)/\(items.count)")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.black.opacity(0.62), in: .capsule)
+                    .padding(12)
+            }
+        }
+        .contentShape(.rect)
+        .onTapGesture(count: 2) {
+            onDoubleTap()
+            triggerHeartBurst()
+        }
+    }
+
+    private func triggerHeartBurst() {
+        showHeartBurst = true
+        heartScale = 0.35
+        heartOpacity = 1.0
+        withAnimation(.spring(duration: 0.38, bounce: 0.48)) {
+            heartScale = 1.08
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(520))
+            withAnimation(.easeOut(duration: 0.22)) {
+                heartOpacity = 0
+                heartScale = 1.24
+            }
+            try? await Task.sleep(for: .milliseconds(240))
+            showHeartBurst = false
+        }
     }
 }
 
@@ -199,32 +291,46 @@ struct PostView: View {
     var showsCommentLink = true
 
     @State private var isCaptionExpanded = false
+    @State private var currentSlide = 0
 
     var body: some View {
+        let isPhone = store.layoutMode == .phone
+
         VStack(alignment: .leading, spacing: 10) {
             header
                 .padding(.horizontal, 14)
 
-            MediaPager(items: post.items) {
+            MediaPager(items: post.items, currentIndex: $currentSlide) {
                 if !post.hasLiked { store.toggleLike(post) }
             }
-            .clipShape(.rect(cornerRadius: 12))
-            .padding(.horizontal, 12)
+            .clipShape(.rect(cornerRadius: isPhone ? 0 : 10))
+            .overlay {
+                if !isPhone {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+                }
+            }
+            .padding(.horizontal, isPhone ? 0 : 12)
 
             actions
                 .padding(.horizontal, 14)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 if post.likeCount > 0 {
                     Text("\(post.likeCount.formatted()) beğenme")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .contentTransition(.numericText(value: Double(post.likeCount)))
                 }
 
                 if !post.caption.isEmpty {
                     Text("**\(post.user.username)**  \(post.caption)")
-                        .font(.subheadline)
-                        .lineLimit(isCaptionExpanded ? nil : 3)
-                        .onTapGesture { isCaptionExpanded.toggle() }
+                        .font(.system(size: 13.5))
+                        .lineLimit(isCaptionExpanded ? nil : 2)
+                        .onTapGesture {
+                            withAnimation(.snappy(duration: 0.22)) {
+                                isCaptionExpanded.toggle()
+                            }
+                        }
                 }
 
                 if showsCommentLink && post.commentCount > 0 {
@@ -232,35 +338,40 @@ struct PostView: View {
                         store.detailPost = post
                     }
                     .buttonStyle(.plain)
-                    .font(.subheadline)
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 }
 
                 Text(post.takenAt, format: .relative(presentation: .named))
-                    .font(.caption)
+                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
+                    .padding(.top, 1)
             }
             .padding(.horizontal, 14)
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
     }
 
     private var header: some View {
         HStack(spacing: 10) {
             Button { store.openProfile(of: post.user) } label: {
                 HStack(spacing: 10) {
-                    AvatarView(url: post.user.avatarURL, size: 34)
+                    AvatarView(url: post.user.avatarURL, size: 32)
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 4) {
-                            Text(post.user.username).font(.subheadline.weight(.semibold))
+                            Text(post.user.username)
+                                .font(.system(size: 13.5, weight: .semibold))
                             if post.user.isVerified {
                                 Image(systemName: "checkmark.seal.fill")
-                                    .font(.caption)
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.blue)
                             }
                         }
                         if let location = post.locationName {
-                            Text(location).font(.caption).foregroundStyle(.secondary)
+                            Text(location)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
                     }
                 }
@@ -268,29 +379,90 @@ struct PostView: View {
             .buttonStyle(.plain)
 
             Spacer()
+
+            Menu {
+                Button {
+                    store.openProfile(of: post.user)
+                } label: {
+                    Label("@\(post.user.username) Profilini Aç", systemImage: "person.crop.circle")
+                }
+                Button {
+                    NSWorkspace.shared.open(permalink)
+                } label: {
+                    Label("Tarayıcıda Aç", systemImage: "safari")
+                }
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+                } label: {
+                    Label("Bağlantıyı Kopyala", systemImage: "link")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(.rect)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
         }
     }
 
     private var actions: some View {
-        HStack(spacing: 18) {
-            Button { store.toggleLike(post) } label: {
-                Image(systemName: post.hasLiked ? "heart.fill" : "heart")
-                    .foregroundStyle(post.hasLiked ? Color.red : Color.primary)
+        ZStack {
+            // Centered iOS Instagram carousel indicator dots
+            if post.items.count > 1 {
+                HStack(spacing: 4) {
+                    ForEach(post.items.indices, id: \.self) { idx in
+                        let active = idx == currentSlide
+                        Circle()
+                            .fill(active ? Color.accentColor : Color.secondary.opacity(0.32))
+                            .frame(width: active ? 6 : 4.5, height: active ? 6 : 4.5)
+                            .animation(.spring(duration: 0.22), value: currentSlide)
+                    }
+                }
             }
-            Button { store.detailPost = post } label: {
-                Image(systemName: "bubble.right")
+
+            HStack(spacing: 16) {
+                Button {
+                    withAnimation(.spring(duration: 0.3, bounce: 0.5)) {
+                        store.toggleLike(post)
+                    }
+                } label: {
+                    Image(systemName: post.hasLiked ? "heart.fill" : "heart")
+                        .foregroundStyle(post.hasLiked ? Color(red: 1.0, green: 0.19, blue: 0.25) : Color.primary)
+                        .symbolEffect(.bounce, value: post.hasLiked)
+                }
+
+                Button { store.detailPost = post } label: {
+                    Image(systemName: "bubble.right")
+                }
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+                } label: {
+                    Image(systemName: "paperplane")
+                }
+                .help("Bağlantıyı kopyala")
+
+                Spacer()
+
+                Button {
+                    withAnimation(.spring(duration: 0.28, bounce: 0.4)) {
+                        store.toggleSave(post)
+                    }
+                } label: {
+                    Image(systemName: post.hasSaved ? "bookmark.fill" : "bookmark")
+                        .symbolEffect(.bounce, value: post.hasSaved)
+                }
             }
-            Button { NSWorkspace.shared.open(permalink) } label: {
-                Image(systemName: "arrow.up.right.square")
-            }
-            .help("Instagram'da aç")
-            Spacer()
-            Button { store.toggleSave(post) } label: {
-                Image(systemName: post.hasSaved ? "bookmark.fill" : "bookmark")
-            }
+            .font(.system(size: 19, weight: .regular))
+            .buttonStyle(.plain)
         }
-        .font(.title3)
-        .buttonStyle(.plain)
+        .padding(.top, 2)
     }
 
     private var permalink: URL {
@@ -308,7 +480,7 @@ struct HomeView: View {
             LazyVStack(spacing: 0) {
                 if !store.stories.isEmpty {
                     StoryTray(store: store)
-                    Divider()
+                    Divider().opacity(0.6)
                 }
 
                 ForEach(store.feed) { post in
@@ -318,14 +490,14 @@ struct HomeView: View {
                                 Task { await store.loadMoreFeed() }
                             }
                         }
-                    Divider()
+                    Divider().opacity(0.5)
                 }
 
                 if store.isLoadingMoreFeed {
-                    ProgressView().padding()
+                    ProgressView().padding(20)
                 }
             }
-            .frame(maxWidth: 560)
+            .frame(maxWidth: store.layoutMode == .phone ? .infinity : 540)
             .frame(maxWidth: .infinity)
         }
         .overlay {
@@ -336,6 +508,7 @@ struct HomeView: View {
     }
 }
 
+/// iOS Instagram Story Tray: 64pt avatars, gradient unseen ring, "+" badge on viewer's own story.
 struct StoryTray: View {
     @Bindable var store: AppStore
 
@@ -343,65 +516,150 @@ struct StoryTray: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 14) {
                 ForEach(store.stories) { tray in
-                    Button {
+                    let isOwn = tray.user.id == store.viewerID
+                    StoryTrayCell(tray: tray, isOwn: isOwn) {
                         store.openStory(tray)
-                    } label: {
-                        VStack(spacing: 6) {
-                            AvatarView(url: tray.user.avatarURL, size: 54, ring: tray.hasUnseen ? .unseen : .seen)
-                            Text(tray.user.id == store.viewerID ? "Hikayen" : tray.user.username)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .frame(width: 68)
-                        }
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, 11)
         }
         .scrollIndicators(.hidden)
     }
 }
 
-// MARK: - Explore
+private struct StoryTrayCell: View {
+    let tray: IGStoryTray
+    let isOwn: Bool
+    let action: () -> Void
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                ZStack(alignment: .bottomTrailing) {
+                    AvatarView(url: tray.user.avatarURL, size: 62, ring: tray.hasUnseen ? .unseen : .seen)
+                    if isOwn {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 20, height: 20)
+                            .overlay {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            .overlay {
+                                Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2)
+                            }
+                            .offset(x: -2, y: -2)
+                    }
+                }
+                Text(isOwn ? "Hikayen" : tray.user.username)
+                    .font(.system(size: 11.5, weight: tray.hasUnseen ? .medium : .regular))
+                    .foregroundStyle(tray.hasUnseen ? .primary : .secondary)
+                    .lineLimit(1)
+                    .frame(width: 72)
+            }
+            .scaleEffect(isPressed ? 0.93 : 1.0)
+            .animation(.spring(duration: 0.22, bounce: 0.35), value: isPressed)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+}
+
+// MARK: - Explore (3:4 portrait tiles with hover engagement overlay)
 
 struct ExploreView: View {
     @Bindable var store: AppStore
+    @State private var filterText = ""
+
+    private var filteredPosts: [IGPost] {
+        let q = filterText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return store.explore }
+        return store.explore.filter {
+            $0.user.username.lowercased().contains(q)
+                || $0.user.fullName.lowercased().contains(q)
+                || $0.caption.lowercased().contains(q)
+                || ($0.locationName?.lowercased().contains(q) ?? false)
+        }
+    }
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 2)], spacing: 2) {
-                ForEach(store.explore) { post in
-                    Button { store.detailPost = post } label: {
-                        Color.clear
-                            .aspectRatio(1, contentMode: .fit)
-                            .overlay { RemoteImage(url: post.items.first?.thumbURL) }
-                            .overlay(alignment: .topTrailing) {
-                                if post.isVideo {
-                                    Image(systemName: "play.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(.white)
-                                        .shadow(radius: 2)
-                                        .padding(6)
-                                } else if post.items.count > 1 {
-                                    Image(systemName: "square.on.square")
-                                        .font(.caption)
-                                        .foregroundStyle(.white)
-                                        .shadow(radius: 2)
-                                        .padding(6)
-                                }
-                            }
-                            .clipped()
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: store.layoutMode == .phone ? 120 : 175), spacing: 2)], spacing: 2) {
+                ForEach(filteredPosts) { post in
+                    MediaGridTile(post: post) {
+                        store.detailPost = post
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(2)
         }
+        .searchable(text: $filterText, prompt: "Keşfet'te filtrele…")
         .overlay {
             LoadStateView(phase: store.explorePhase, isEmpty: store.explore.isEmpty, emptyTitle: "Keşfet boş", emptySymbol: "magnifyingglass") {
                 Task { await store.refresh(.explore) }
+            }
+        }
+    }
+}
+
+/// Reusable 3:4 portrait grid tile matching the modern Instagram iOS profile & explore grid, with macOS hover stats.
+struct MediaGridTile: View {
+    let post: IGPost
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Color.clear
+                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                .overlay {
+                    RemoteImage(url: post.items.first?.thumbURL)
+                        .scaleEffect(isHovered ? 1.03 : 1.0)
+                        .animation(.easeOut(duration: 0.22), value: isHovered)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if post.isVideo {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+                            .padding(8)
+                    } else if post.items.count > 1 {
+                        Image(systemName: "square.fill.on.square.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+                            .padding(8)
+                    }
+                }
+                .overlay {
+                    if isHovered {
+                        Color.black.opacity(0.38)
+                            .overlay {
+                                HStack(spacing: 16) {
+                                    Label(post.likeCount.formatted(.number.notation(.compactName)), systemImage: "heart.fill")
+                                    Label(post.commentCount.formatted(.number.notation(.compactName)), systemImage: "bubble.right.fill")
+                                }
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                            }
+                            .transition(.opacity)
+                    }
+                }
+                .clipped()
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovered = hovering
             }
         }
     }
@@ -445,51 +703,82 @@ struct ReelPage: View {
                 Color.black
             }
 
-            HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 6) {
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.65)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .frame(height: 220)
+            .allowsHitTesting(false)
+
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
                     Button { store.openProfile(of: reel.user) } label: {
-                        HStack(spacing: 8) {
-                            AvatarView(url: reel.user.avatarURL, size: 28)
-                            Text(reel.user.username).font(.subheadline.weight(.semibold))
+                        HStack(spacing: 9) {
+                            AvatarView(url: reel.user.avatarURL, size: 32)
+                            Text(reel.user.username)
+                                .font(.system(size: 14, weight: .semibold))
+                            if reel.user.isVerified {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                            }
                         }
                     }
                     .buttonStyle(.plain)
 
                     if !reel.caption.isEmpty {
-                        Text(reel.caption).font(.footnote).lineLimit(2)
+                        Text(reel.caption)
+                            .font(.system(size: 13))
+                            .lineLimit(2)
                     }
                 }
                 .foregroundStyle(.white)
-                .shadow(radius: 3)
-                .padding(.bottom, 54)
+                .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                .padding(.bottom, store.layoutMode == .phone ? 64 : 24)
 
                 Spacer()
 
-                VStack(spacing: 12) {
-                    Button { store.toggleLike(reel) } label: {
-                        VStack(spacing: 2) {
-                            Image(systemName: reel.hasLiked ? "heart.fill" : "heart")
-                                .foregroundStyle(reel.hasLiked ? Color.red : Color.primary)
-                            Text(reel.likeCount.formatted(.number.notation(.compactName))).font(.caption2)
+                VStack(spacing: 14) {
+                    Button {
+                        withAnimation(.spring(duration: 0.3, bounce: 0.5)) {
+                            store.toggleLike(reel)
                         }
-                        .frame(width: 44, height: 50)
+                    } label: {
+                        VStack(spacing: 3) {
+                            Image(systemName: reel.hasLiked ? "heart.fill" : "heart")
+                                .font(.system(size: 20))
+                                .foregroundStyle(reel.hasLiked ? Color(red: 1.0, green: 0.19, blue: 0.25) : Color.primary)
+                                .symbolEffect(.bounce, value: reel.hasLiked)
+                            Text(reel.likeCount.formatted(.number.notation(.compactName)))
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .frame(width: 46, height: 52)
                     }
                     Button { store.detailPost = reel } label: {
-                        VStack(spacing: 2) {
+                        VStack(spacing: 3) {
                             Image(systemName: "bubble.right")
-                            Text(reel.commentCount.formatted(.number.notation(.compactName))).font(.caption2)
+                                .font(.system(size: 19))
+                            Text(reel.commentCount.formatted(.number.notation(.compactName)))
+                                .font(.system(size: 11, weight: .medium))
                         }
-                        .frame(width: 44, height: 50)
+                        .frame(width: 46, height: 52)
                     }
-                    Button { store.toggleSave(reel) } label: {
+                    Button {
+                        withAnimation(.spring(duration: 0.28, bounce: 0.4)) {
+                            store.toggleSave(reel)
+                        }
+                    } label: {
                         Image(systemName: reel.hasSaved ? "bookmark.fill" : "bookmark")
-                            .frame(width: 44, height: 36)
+                            .font(.system(size: 18))
+                            .frame(width: 46, height: 38)
+                            .symbolEffect(.bounce, value: reel.hasSaved)
                     }
                 }
                 .buttonStyle(.glass)
-                .padding(.bottom, 54)
+                .padding(.bottom, store.layoutMode == .phone ? 64 : 24)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
         }
     }
 }
@@ -501,24 +790,26 @@ struct ActivityView: View {
 
     var body: some View {
         List(store.activity) { item in
-            HStack(spacing: 10) {
-                AvatarView(url: item.avatarURL, size: 36)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.text).font(.subheadline).lineLimit(3)
+            HStack(spacing: 12) {
+                AvatarView(url: item.avatarURL, size: 40)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.text)
+                        .font(.system(size: 13))
+                        .lineLimit(3)
                     if let date = item.date {
                         Text(date, format: .relative(presentation: .named))
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 6)
                 if let thumb = item.thumbURL {
                     RemoteImage(url: thumb)
-                        .frame(width: 38, height: 38)
+                        .frame(width: 42, height: 42)
                         .clipShape(.rect(cornerRadius: 6))
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 4)
         }
         .overlay {
             LoadStateView(phase: store.activityPhase, isEmpty: store.activity.isEmpty, emptyTitle: "Bildirim yok", emptySymbol: "heart") {
@@ -529,25 +820,40 @@ struct ActivityView: View {
     }
 }
 
-// MARK: - Direct Messages & Notes
+// MARK: - Apple Messages-Style Direct Messages & iOS Instagram Notes
 
 struct MessagesView: View {
     @Bindable var store: AppStore
     @State private var phoneOpenThread: IGDirectThread?
+    @State private var searchText = ""
+
+    private var pinnedThreads: [IGDirectThread] {
+        filteredThreads.filter(\.isPinned)
+    }
+
+    private var filteredThreads: [IGDirectThread] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return store.directThreads }
+        return store.directThreads.filter {
+            $0.title.lowercased().contains(q)
+                || $0.snippet.lowercased().contains(q)
+                || $0.users.contains(where: { $0.username.lowercased().contains(q) })
+        }
+    }
 
     var body: some View {
         Group {
             if store.layoutMode == .phone {
                 NavigationStack {
-                    threadList(isPhone: true)
+                    inboxMasterList(isPhone: true)
                         .navigationDestination(item: $phoneOpenThread) { thread in
                             DirectConversationView(threadID: thread.id, store: store)
                         }
                 }
             } else {
                 HStack(spacing: 0) {
-                    threadList(isPhone: false)
-                        .frame(width: 310)
+                    inboxMasterList(isPhone: false)
+                        .frame(width: 325)
                     Divider()
                     if let thread = store.selectedThread {
                         DirectConversationView(threadID: thread.id, store: store)
@@ -555,8 +861,8 @@ struct MessagesView: View {
                     } else {
                         ContentUnavailableView(
                             "Sohbet Seçin",
-                            systemImage: "paperplane",
-                            description: Text("Mesajları görüntülemek veya yanıtlamak için soldaki listeden bir kişi seçin.")
+                            systemImage: "message",
+                            description: Text("Mesajları görüntülemek veya yanıtlamak için soldaki listeden bir sohbet seçin.")
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -570,112 +876,254 @@ struct MessagesView: View {
         }
     }
 
-    private func threadList(isPhone: Bool) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if !store.notes.isEmpty {
-                    NotesBar(store: store)
-                    Divider()
-                }
-
-                ForEach(store.directThreads) { thread in
-                    let isSelected = !isPhone && store.selectedThread?.id == thread.id
+    private func inboxMasterList(isPhone: Bool) -> some View {
+        VStack(spacing: 0) {
+            // Apple Messages-style search field at top of conversation list
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("Sohbetlerde ara", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !searchText.isEmpty {
                     Button {
-                        store.selectThread(thread)
-                        if isPhone { phoneOpenThread = thread }
+                        searchText = ""
                     } label: {
-                        HStack(spacing: 12) {
-                            AvatarView(url: thread.users.first?.avatarURL, size: 44)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 4) {
-                                    Text(thread.title)
-                                        .font(.subheadline.weight(thread.isUnread ? .bold : .semibold))
-                                        .lineLimit(1)
-                                    if thread.isPinned {
-                                        Image(systemName: "pin.fill")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(thread.lastActivityAt, format: .relative(presentation: .named))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text(thread.snippet.isEmpty ? "Mesajları görüntüle" : thread.snippet)
-                                    .font(.caption)
-                                    .foregroundStyle(thread.isUnread ? .primary : .secondary)
-                                    .lineLimit(1)
-                            }
-                            if thread.isUnread {
-                                Circle()
-                                    .fill(Color.accentColor)
-                                    .frame(width: 8, height: 8)
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .contentShape(.rect)
-                        .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    Divider()
                 }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.quaternary.opacity(0.6), in: .rect(cornerRadius: 8))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider().opacity(0.6)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if !store.notes.isEmpty && searchText.isEmpty {
+                        NotesBar(store: store)
+                        Divider().opacity(0.6)
+                    }
+
+                    // Apple Messages-style Pinned Conversations Pod Row when pinned threads exist
+                    if !pinnedThreads.isEmpty && searchText.isEmpty {
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 18) {
+                                ForEach(pinnedThreads) { pinned in
+                                    Button {
+                                        withAnimation(.snappy(duration: 0.22)) {
+                                            store.selectThread(pinned)
+                                            if isPhone { phoneOpenThread = pinned }
+                                        }
+                                    } label: {
+                                        VStack(spacing: 6) {
+                                            ZStack(alignment: .topTrailing) {
+                                                AvatarView(url: pinned.users.first?.avatarURL, size: 54)
+                                                    .shadow(color: .black.opacity(0.14), radius: 6, y: 2)
+                                                if pinned.isUnread {
+                                                    Circle()
+                                                        .fill(Color.accentColor)
+                                                        .frame(width: 11, height: 11)
+                                                        .overlay {
+                                                            Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2)
+                                                        }
+                                                }
+                                            }
+                                            Text(pinned.title)
+                                                .font(.system(size: 11, weight: .medium))
+                                                .lineLimit(1)
+                                                .frame(width: 72)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                        }
+                        .scrollIndicators(.hidden)
+                        Divider().opacity(0.5)
+                    }
+
+                    ForEach(filteredThreads) { thread in
+                        let isSelected = !isPhone && store.selectedThread?.id == thread.id
+                        InboxThreadRow(
+                            thread: thread,
+                            isSelected: isSelected
+                        ) {
+                            withAnimation(.snappy(duration: 0.2)) {
+                                store.selectThread(thread)
+                                if isPhone { phoneOpenThread = thread }
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
             }
         }
     }
 }
 
+private struct InboxThreadRow: View {
+    let thread: IGDirectThread
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                // Apple Messages left unread blue indicator dot
+                Circle()
+                    .fill(thread.isUnread ? Color.accentColor : Color.clear)
+                    .frame(width: 8, height: 8)
+
+                AvatarView(url: thread.users.first?.avatarURL, size: 46)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(thread.title)
+                            .font(.system(size: 13.5, weight: thread.isUnread ? .bold : .semibold))
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .lineLimit(1)
+
+                        if thread.users.first?.isVerified == true {
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(isSelected ? .white.opacity(0.9) : .blue)
+                        }
+
+                        Spacer(minLength: 4)
+
+                        Text(thread.lastActivityAt, format: .relative(presentation: .named))
+                            .font(.system(size: 11))
+                            .foregroundStyle(isSelected ? .white.opacity(0.82) : .secondary)
+                    }
+
+                    HStack(spacing: 4) {
+                        Text(thread.snippet.isEmpty ? "Sohbeti görüntüle" : thread.snippet)
+                            .font(.system(size: 12.5, weight: thread.isUnread ? .medium : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? .white.opacity(0.88)
+                                    : (thread.isUnread ? .primary : .secondary)
+                            )
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
+                        if thread.isPinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(isSelected ? .white.opacity(0.75) : .secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 12)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? Color.accentColor : Color.clear)
+            )
+            .padding(.horizontal, 8)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// iOS Instagram Notes Bar: thought-bubble callout with two descending circles anchored to the avatar.
 struct NotesBar: View {
     @Bindable var store: AppStore
 
     var body: some View {
         ScrollView(.horizontal) {
-            LazyHStack(alignment: .bottom, spacing: 14) {
+            LazyHStack(alignment: .bottom, spacing: 16) {
                 ForEach(store.notes) { note in
                     Button {
                         store.openProfile(of: note.user)
                     } label: {
-                        VStack(spacing: 4) {
-                            VStack(spacing: 2) {
-                                if !note.text.isEmpty {
-                                    Text(note.text)
-                                        .font(.caption2)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.center)
-                                }
-                                if let music = note.musicTitle, !music.isEmpty {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "music.note")
-                                            .font(.system(size: 8, weight: .bold))
-                                        Text(music)
-                                            .font(.system(size: 9, weight: .medium))
-                                            .lineLimit(1)
-                                    }
-                                    .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .frame(maxWidth: 92)
-                            .background(.quaternary.opacity(0.65), in: .rect(cornerRadius: 12))
+                        VStack(spacing: 3) {
+                            // Thought bubble + descending tail dots overlapping top of avatar
+                            ZStack(alignment: .bottom) {
+                                AvatarView(url: note.user.avatarURL, size: 54)
+                                    .padding(.top, 26)
 
-                            AvatarView(url: note.user.avatarURL, size: 46)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    VStack(spacing: 2) {
+                                        if !note.text.isEmpty {
+                                            Text(note.text)
+                                                .font(.system(size: 11, weight: .medium))
+                                                .lineLimit(2)
+                                                .multilineTextAlignment(.center)
+                                        }
+                                        if let music = note.musicTitle, !music.isEmpty {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "waveform")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .foregroundStyle(Color.accentColor)
+                                                Text(music)
+                                                    .font(.system(size: 9.5, weight: .semibold))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 6)
+                                    .frame(maxWidth: 96)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                                    )
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+                                    }
+
+                                    // Two thought-bubble tail circles
+                                    VStack(alignment: .leading, spacing: 1.5) {
+                                        Circle()
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .frame(width: 7, height: 7)
+                                            .shadow(color: .black.opacity(0.1), radius: 1, y: 1)
+                                        Circle()
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .frame(width: 4.5, height: 4.5)
+                                            .offset(x: 3)
+                                    }
+                                    .padding(.leading, 18)
+                                }
+                                .offset(y: -38)
+                            }
+                            .frame(height: 82, alignment: .bottom)
 
                             Text(note.user.id == store.viewerID ? "Notun" : note.user.username)
-                                .font(.caption2)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                                .frame(width: 72)
+                                .frame(width: 74)
                         }
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
         }
         .scrollIndicators(.hidden)
     }
 }
+
+// MARK: - Apple Messages Conversation Transcript & Consecutive Bubble Grouping
 
 struct DirectConversationView: View {
     let threadID: String
@@ -691,10 +1139,9 @@ struct DirectConversationView: View {
         VStack(spacing: 0) {
             if let thread {
                 conversationHeader(thread)
-                Divider()
-                messagesList(thread)
-                Divider()
-                composer(thread)
+                Divider().opacity(0.6)
+                messagesTranscript(thread)
+                composerBar(thread)
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -703,71 +1150,121 @@ struct DirectConversationView: View {
     }
 
     private func conversationHeader(_ thread: IGDirectThread) -> some View {
-        HStack(spacing: 10) {
-            AvatarView(url: thread.users.first?.avatarURL, size: 32)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(thread.title).font(.subheadline.weight(.semibold))
-                if let username = thread.users.first?.username {
-                    Text("@\(username)").font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 11) {
+            Button {
+                if let user = thread.users.first { store.openProfile(of: user) }
+            } label: {
+                HStack(spacing: 10) {
+                    AvatarView(url: thread.users.first?.avatarURL, size: 34)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 4) {
+                            Text(thread.title)
+                                .font(.system(size: 13.5, weight: .semibold))
+                            if thread.users.first?.isVerified == true {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        if let username = thread.users.first?.username {
+                            Text("@\(username)")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
+            .buttonStyle(.plain)
+
             Spacer()
+
             if let user = thread.users.first {
-                Button("Profili Aç") { store.openProfile(of: user) }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                Button {
+                    store.openProfile(of: user)
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 15))
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .help("Profil bilgilerini aç")
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
     }
 
-    private func messagesList(_ thread: IGDirectThread) -> some View {
-        ScrollViewReader { proxy in
+    private func messagesTranscript(_ thread: IGDirectThread) -> some View {
+        let msgs = thread.messages
+
+        return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 10) {
-                    if thread.messages.isEmpty {
-                        Text("Mesaj geçmişi yükleniyor veya henüz mesaj yok.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 32)
-                    }
-                    ForEach(thread.messages) { message in
-                        HStack(alignment: .bottom, spacing: 8) {
-                            if message.isFromViewer {
-                                Spacer(minLength: 48)
-                            } else {
-                                AvatarView(url: message.senderAvatarURL ?? thread.users.first?.avatarURL, size: 24)
-                            }
-
-                            VStack(alignment: message.isFromViewer ? .trailing : .leading, spacing: 3) {
-                                Text(message.text)
-                                    .font(.subheadline)
-                                    .foregroundStyle(message.isFromViewer ? Color.white : Color.primary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        message.isFromViewer ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary),
-                                        in: .rect(cornerRadius: 16)
-                                    )
-
-                                Text(message.timestamp, format: .dateTime.hour().minute())
-                                    .font(.caption2)
+                LazyVStack(spacing: 0) {
+                    // Conversation identity card at top of transcript (like iOS Instagram DM / Apple Messages)
+                    if let peer = thread.users.first {
+                        VStack(spacing: 8) {
+                            AvatarView(url: peer.avatarURL, size: 68)
+                            VStack(spacing: 2) {
+                                Text(thread.title)
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("@\(peer.username) · Instagram")
+                                    .font(.system(size: 12))
                                     .foregroundStyle(.secondary)
                             }
-
-                            if !message.isFromViewer {
-                                Spacer(minLength: 48)
+                            Button("Profili Gör") {
+                                store.openProfile(of: peer)
                             }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                            .padding(.top, 2)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                    }
+
+                    ForEach(Array(msgs.enumerated()), id: \.element.id) { index, message in
+                        let prev: IGDirectMessage? = index > 0 ? msgs[index - 1] : nil
+                        let next: IGDirectMessage? = index + 1 < msgs.count ? msgs[index + 1] : nil
+
+                        let showTimestampHeader = prev == nil || message.timestamp.timeIntervalSince(prev!.timestamp) > 900
+                        let sameAsPrev = !showTimestampHeader
+                            && prev?.isFromViewer == message.isFromViewer
+                            && prev?.senderFBID == message.senderFBID
+                        let sameAsNext = next != nil
+                            && next!.timestamp.timeIntervalSince(message.timestamp) <= 900
+                            && next?.isFromViewer == message.isFromViewer
+                            && next?.senderFBID == message.senderFBID
+
+                        VStack(spacing: 0) {
+                            if showTimestampHeader {
+                                Text(message.timestamp, format: .dateTime.day().month(.abbreviated).hour().minute())
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 14)
+                                    .padding(.bottom, 8)
+                            }
+
+                            MessageBubbleRow(
+                                message: message,
+                                fallbackAvatar: thread.users.first?.avatarURL,
+                                isFirstInGroup: !sameAsPrev,
+                                isLastInGroup: !sameAsNext
+                            )
+                            .padding(.top, sameAsPrev ? 2 : 9)
                         }
                         .id(message.id)
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.92, anchor: message.isFromViewer ? .bottomTrailing : .bottomLeading).combined(with: .opacity),
+                            removal: .opacity
+                        ))
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 14)
             }
-            .onChange(of: thread.messages.count, initial: true) { _, _ in
-                if let lastID = thread.messages.last?.id {
-                    withAnimation(.snappy(duration: 0.2)) {
+            .onChange(of: msgs.count, initial: true) { _, _ in
+                if let lastID = msgs.last?.id {
+                    withAnimation(.spring(duration: 0.28, bounce: 0.2)) {
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
@@ -775,41 +1272,153 @@ struct DirectConversationView: View {
         }
     }
 
-    private func composer(_ thread: IGDirectThread) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    /// Apple Messages capsule composer with integrated circular up-arrow send button.
+    private func composerBar(_ thread: IGDirectThread) -> some View {
+        let canSend = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isSendingDirectMessage
+
+        return VStack(alignment: .leading, spacing: 4) {
             if sendFailed {
                 Text("Mesaj gönderilemedi. Yeniden deneyin.")
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .padding(.horizontal, 6)
             }
+
             HStack(spacing: 8) {
-                TextField("Mesaj yaz…", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { send(in: thread) }
-                Button("Gönder") { send(in: thread) }
-                    .buttonStyle(.glassProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSendingDirectMessage)
+                Button {
+                    Task { _ = await store.sendDirectMessage(text: "❤️", in: thread) }
+                } label: {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Kalp gönder")
+
+                HStack(spacing: 6) {
+                    TextField("Mesaj…", text: $draft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13.5))
+                        .onSubmit { send(in: thread) }
+
+                    Button {
+                        send(in: thread)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.system(size: 24))
+                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.4))
+                            .scaleEffect(canSend ? 1.0 : 0.88)
+                            .animation(.spring(duration: 0.22, bounce: 0.35), value: canSend)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                }
+                .padding(.leading, 12)
+                .padding(.trailing, 5)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay {
+                    Capsule()
+                        .strokeBorder(.primary.opacity(0.14), lineWidth: 0.8)
+                }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private func send(in thread: IGDirectThread) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !store.isSendingDirectMessage else { return }
         sendFailed = false
+        let copy = text
+        draft = ""
         Task {
-            let ok = await store.sendDirectMessage(text: text, in: thread)
-            if ok {
-                draft = ""
-            } else {
+            let ok = await store.sendDirectMessage(text: copy, in: thread)
+            if !ok {
+                draft = copy
                 sendFailed = true
             }
         }
     }
 }
 
-// MARK: - Profile
+/// Renders an individual bubble following Apple Messages / iOS Instagram DM consecutive grouping geometry.
+private struct MessageBubbleRow: View {
+    let message: IGDirectMessage
+    let fallbackAvatar: URL?
+    let isFirstInGroup: Bool
+    let isLastInGroup: Bool
+
+    private var bubbleRadii: RectangleCornerRadii {
+        let big: CGFloat = 18
+        let tight: CGFloat = 5
+        if message.isFromViewer {
+            return RectangleCornerRadii(
+                topLeading: big,
+                bottomLeading: big,
+                bottomTrailing: isLastInGroup ? tight : tight,
+                topTrailing: isFirstInGroup ? big : tight
+            )
+        } else {
+            return RectangleCornerRadii(
+                topLeading: isFirstInGroup ? big : tight,
+                bottomLeading: isLastInGroup ? tight : tight,
+                bottomTrailing: big,
+                topTrailing: big
+            )
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if message.isFromViewer {
+                Spacer(minLength: 60)
+            } else {
+                if isLastInGroup {
+                    AvatarView(url: message.senderAvatarURL ?? fallbackAvatar, size: 26)
+                } else {
+                    Color.clear.frame(width: 26, height: 26)
+                }
+            }
+
+            Text(message.text)
+                .font(.system(size: 13.5))
+                .foregroundStyle(message.isFromViewer ? Color.white : Color.primary)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 8)
+                .background(
+                    UnevenRoundedRectangle(cornerRadii: bubbleRadii, style: .continuous)
+                        .fill(
+                            message.isFromViewer
+                                ? AnyShapeStyle(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.34, green: 0.38, blue: 0.98),
+                                            Color(red: 0.08, green: 0.52, blue: 0.99)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                : AnyShapeStyle(.quaternary.opacity(0.85))
+                        )
+                )
+                .help(message.timestamp.formatted(date: .abbreviated, time: .shortened))
+
+            if !message.isFromViewer {
+                Spacer(minLength: 60)
+            }
+        }
+    }
+}
+
+// MARK: - Profile (iOS Instagram layout + 3:4 grid)
 
 struct ProfileView: View {
     @Bindable var store: AppStore
@@ -819,20 +1428,37 @@ struct ProfileView: View {
             VStack(spacing: 16) {
                 if let user = store.profile {
                     VStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 20) {
-                            AvatarView(url: user.avatarURL, size: 84)
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack(spacing: 22) {
+                        HStack(spacing: 22) {
+                            AvatarView(
+                                url: user.avatarURL,
+                                size: 84,
+                                ring: store.profileHighlights.isEmpty ? .none : .seen
+                            )
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(spacing: 26) {
                                     stat(user.mediaCount ?? store.profilePosts.count, "gönderi")
                                     stat(user.followerCount, "takipçi")
                                     stat(user.followingCount, "takip")
                                 }
+
                                 if user.id != store.viewerID, let isFollowing = user.isFollowing {
-                                    Button(isFollowing ? "Takipten Çık" : "Takip Et") {
-                                        store.toggleFollow(user)
+                                    HStack(spacing: 8) {
+                                        if isFollowing {
+                                            Button("Takipten Çık") { store.toggleFollow(user) }
+                                                .buttonStyle(.glass)
+                                                .controlSize(.small)
+                                        } else {
+                                            Button("Takip Et") { store.toggleFollow(user) }
+                                                .buttonStyle(.glassProminent)
+                                                .controlSize(.small)
+                                        }
+                                        Button("Mesaj") {
+                                            store.select(.direct)
+                                        }
+                                        .buttonStyle(.glass)
+                                        .controlSize(.small)
                                     }
-                                    .buttonStyle(.glassProminent)
-                                    .controlSize(.small)
                                 }
                             }
                         }
@@ -840,14 +1466,20 @@ struct ProfileView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 4) {
                                 Text(user.fullName.isEmpty ? user.username : user.fullName)
-                                    .font(.headline)
+                                    .font(.system(size: 14.5, weight: .semibold))
                                 if user.isVerified {
-                                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.blue)
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.blue)
                                 }
                             }
-                            Text("@\(user.username)").font(.subheadline).foregroundStyle(.secondary)
+                            Text("@\(user.username)")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
                             if !user.biography.isEmpty {
-                                Text(user.biography).font(.subheadline)
+                                Text(user.biography)
+                                    .font(.system(size: 13))
+                                    .padding(.top, 2)
                             }
                             if let link = user.externalURL {
                                 Link(destination: link) {
@@ -856,8 +1488,9 @@ struct ProfileView: View {
                                         Text(link.host ?? link.absoluteString)
                                             .lineLimit(1)
                                     }
-                                    .font(.caption.weight(.medium))
+                                    .font(.system(size: 12.5, weight: .semibold))
                                 }
+                                .padding(.top, 2)
                             }
                         }
 
@@ -869,11 +1502,11 @@ struct ProfileView: View {
                                             store.openStory(highlight)
                                         } label: {
                                             VStack(spacing: 5) {
-                                                AvatarView(url: highlight.coverURL ?? user.avatarURL, size: 52, ring: .seen)
+                                                AvatarView(url: highlight.coverURL ?? user.avatarURL, size: 56, ring: .seen)
                                                 Text(highlight.title ?? "Öne Çıkan")
-                                                    .font(.caption2)
+                                                    .font(.system(size: 11))
                                                     .lineLimit(1)
-                                                    .frame(width: 64)
+                                                    .frame(width: 66)
                                             }
                                         }
                                         .buttonStyle(.plain)
@@ -884,11 +1517,11 @@ struct ProfileView: View {
                             .scrollIndicators(.hidden)
                         }
                     }
-                    .frame(maxWidth: 560, alignment: .leading)
+                    .frame(maxWidth: 620, alignment: .leading)
                     .padding(.horizontal, 16)
-                    .padding(.top, 12)
+                    .padding(.top, 14)
 
-                    Divider()
+                    Divider().opacity(0.6)
 
                     if store.profilePosts.isEmpty && user.isPrivate && user.isFollowing != true && user.id != store.viewerID {
                         ContentUnavailableView(
@@ -896,32 +1529,13 @@ struct ProfileView: View {
                             systemImage: "lock.fill",
                             description: Text("Fotoğraf ve videolarını görmek için bu hesabı takip edin.")
                         )
-                        .padding(.top, 24)
+                        .padding(.top, 28)
                     } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 2)], spacing: 2) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: store.layoutMode == .phone ? 120 : 175), spacing: 2)], spacing: 2) {
                             ForEach(store.profilePosts) { post in
-                                Button { store.detailPost = post } label: {
-                                    Color.clear
-                                        .aspectRatio(1, contentMode: .fit)
-                                        .overlay { RemoteImage(url: post.items.first?.thumbURL) }
-                                        .overlay(alignment: .topTrailing) {
-                                            if post.isVideo {
-                                                Image(systemName: "play.fill")
-                                                    .font(.caption)
-                                                    .foregroundStyle(.white)
-                                                    .shadow(radius: 2)
-                                                    .padding(6)
-                                            } else if post.items.count > 1 {
-                                                Image(systemName: "square.on.square")
-                                                    .font(.caption)
-                                                    .foregroundStyle(.white)
-                                                    .shadow(radius: 2)
-                                                    .padding(6)
-                                            }
-                                        }
-                                        .clipped()
+                                MediaGridTile(post: post) {
+                                    store.detailPost = post
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                         .padding(2)
@@ -937,10 +1551,12 @@ struct ProfileView: View {
     }
 
     private func stat(_ value: Int?, _ label: String) -> some View {
-        VStack(spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(value.map { $0.formatted(.number.notation(.compactName)) } ?? "–")
-                .font(.headline)
-            Text(label).font(.caption).foregroundStyle(.secondary)
+                .font(.system(size: 15, weight: .bold))
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
         }
     }
 }

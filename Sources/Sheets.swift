@@ -2,13 +2,14 @@ import SwiftUI
 import WebKit
 import AppKit
 
-// MARK: - Story viewer
+// MARK: - Story viewer (9:16 iOS Instagram story canvas + animated scrub bars)
 
 struct StoryViewer: View {
     let tray: IGStoryTray
     @Bindable var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
+    @State private var slideProgress: CGFloat = 0
 
     private var activeTray: IGStoryTray {
         if let latest = store.storyViewer, latest.id == tray.id {
@@ -26,13 +27,16 @@ struct StoryViewer: View {
             if let slide {
                 Group {
                     if let video = slide.videoURL {
-                        InlineVideo(url: video, autoplay: true, muted: false, showsControls: false, fillsFrame: false)
+                        InlineVideo(url: video, autoplay: true, muted: false, showsControls: false, fillsFrame: true)
                             .allowsHitTesting(false)
                     } else {
                         RemoteImage(url: slide.imageURL)
                     }
                 }
+                .frame(width: 400, height: 710)
+                .clipped()
                 .id(slide.id)
+                .transition(.opacity.animation(.easeOut(duration: 0.18)))
             } else if store.isLoadingStorySlides {
                 ProgressView()
                     .tint(.white)
@@ -44,18 +48,34 @@ struct StoryViewer: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
+            // Left / right tap zones for previous / next slide
             HStack(spacing: 0) {
-                Color.clear.contentShape(.rect).onTapGesture { step(-1) }
-                Color.clear.contentShape(.rect).onTapGesture { step(1) }
+                Color.clear
+                    .frame(width: 130)
+                    .contentShape(.rect)
+                    .onTapGesture { step(-1) }
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .contentShape(.rect)
+                    .onTapGesture { step(1) }
             }
 
-            VStack(spacing: 10) {
+            VStack(spacing: 11) {
                 if !activeTray.slides.isEmpty {
                     HStack(spacing: 4) {
                         ForEach(activeTray.slides.indices, id: \.self) { position in
-                            Capsule()
-                                .fill(position <= index ? Color.white : Color.white.opacity(0.35))
-                                .frame(height: 3)
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.32))
+                                    Capsule()
+                                        .fill(Color.white)
+                                        .frame(
+                                            width: geo.size.width * fillFraction(for: position)
+                                        )
+                                }
+                            }
+                            .frame(height: 2.5)
                         }
                     }
                 }
@@ -67,50 +87,74 @@ struct StoryViewer: View {
                         store.openProfile(of: user)
                     } label: {
                         HStack(spacing: 10) {
-                            AvatarView(url: activeTray.user.avatarURL, size: 30)
+                            AvatarView(url: activeTray.user.avatarURL, size: 32)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(activeTray.title ?? activeTray.user.username)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
+                                HStack(spacing: 4) {
+                                    Text(activeTray.title ?? activeTray.user.username)
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                    if activeTray.user.isVerified {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.white)
+                                    }
+                                }
                                 if activeTray.title != nil {
                                     Text("@\(activeTray.user.username)")
-                                        .font(.caption2)
+                                        .font(.system(size: 11))
                                         .foregroundStyle(.white.opacity(0.75))
                                 }
                             }
                         }
                     }
                     .buttonStyle(.plain)
+
                     Spacer()
+
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
                     }
                     .buttonStyle(.glass)
+                    .keyboardShortcut(.cancelAction)
                 }
             }
             .padding(14)
             .background(
-                LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
+                LinearGradient(colors: [.black.opacity(0.62), .clear], startPoint: .top, endPoint: .bottom)
                     .allowsHitTesting(false)
             )
         }
         .frame(width: 400, height: 710)
         .task(id: "\(activeTray.slides.count)-\(index)") {
             guard !activeTray.slides.isEmpty else { return }
-            try? await Task.sleep(for: .seconds(slide?.videoURL == nil ? 6 : 12))
+            let duration: Double = slide?.videoURL == nil ? 6.0 : 12.0
+            slideProgress = 0
+            withAnimation(.linear(duration: duration)) {
+                slideProgress = 1.0
+            }
+            try? await Task.sleep(for: .seconds(duration))
             if !Task.isCancelled { step(1) }
         }
         .onDisappear { store.storyViewer = nil }
+    }
+
+    private func fillFraction(for position: Int) -> CGFloat {
+        if position < index { return 1.0 }
+        if position > index { return 0.0 }
+        return slideProgress
     }
 
     private func step(_ delta: Int) {
         guard !activeTray.slides.isEmpty else { return }
         let next = index + delta
         if next < 0 {
-            return
+            slideProgress = 0
+            index = 0
         } else if next >= activeTray.slides.count {
             dismiss()
         } else {
+            slideProgress = 0
             index = next
         }
     }
@@ -137,7 +181,7 @@ struct PostDetailView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     PostView(post: post, store: store, showsCommentLink: false)
-                    Divider()
+                    Divider().opacity(0.6)
 
                     switch phase {
                     case .idle, .loading:
@@ -149,16 +193,27 @@ struct PostDetailView: View {
                             .padding(24)
                     case .loaded:
                         if comments.isEmpty {
-                            Text("Henüz yorum yok").font(.footnote).foregroundStyle(.secondary).padding(24)
+                            Text("Henüz yorum yok")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .padding(24)
                         }
                         ForEach(comments) { comment in
                             HStack(alignment: .top, spacing: 10) {
-                                AvatarView(url: comment.user.avatarURL, size: 30)
+                                Button {
+                                    let author = comment.user
+                                    dismiss()
+                                    store.openProfile(of: author)
+                                } label: {
+                                    AvatarView(url: comment.user.avatarURL, size: 30)
+                                }
+                                .buttonStyle(.plain)
+
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text("**\(comment.user.username)**  \(comment.text)")
-                                        .font(.subheadline)
+                                        .font(.system(size: 13))
                                     Text(comment.createdAt, format: .relative(presentation: .named))
-                                        .font(.caption)
+                                        .font(.system(size: 11))
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 0)
@@ -168,24 +223,42 @@ struct PostDetailView: View {
                         }
                     }
                 }
-                .frame(maxWidth: 560)
+                .frame(maxWidth: 540)
                 .frame(maxWidth: .infinity)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
+                let canSend = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
                 VStack(alignment: .leading, spacing: 4) {
                     if let sendError {
                         Text(sendError).font(.caption).foregroundStyle(.red)
                     }
                     HStack(spacing: 8) {
-                        TextField("Yorum ekle…", text: $draft)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(send)
-                        Button("Paylaş", action: send)
-                            .buttonStyle(.glassProminent)
-                            .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty || isSending)
+                        AvatarView(url: store.profile?.avatarURL, size: 26)
+                        HStack(spacing: 6) {
+                            TextField("Yorum ekle…", text: $draft)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 13))
+                                .onSubmit(send)
+                            Button(action: send) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .symbolRenderingMode(.hierarchical)
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.4))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!canSend)
+                        }
+                        .padding(.leading, 12)
+                        .padding(.trailing, 5)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color(nsColor: .controlBackgroundColor)))
+                        .overlay {
+                            Capsule().strokeBorder(.primary.opacity(0.14), lineWidth: 0.8)
+                        }
                     }
                 }
                 .padding(12)
+                .background(.bar)
             }
             .navigationTitle(post.user.username)
             .toolbar {
@@ -194,7 +267,7 @@ struct PostDetailView: View {
                 }
             }
         }
-        .frame(width: 460, height: 700)
+        .frame(width: 480, height: 720)
         .task { await loadComments() }
         .onDisappear { store.detailPost = nil }
     }
@@ -217,7 +290,9 @@ struct PostDetailView: View {
         Task {
             do {
                 if let comment = try await store.addComment(to: postID, text: text) {
-                    comments.append(comment)
+                    withAnimation(.spring(duration: 0.25)) {
+                        comments.append(comment)
+                    }
                 } else {
                     await loadComments()
                 }
@@ -239,7 +314,7 @@ struct LoginSheet: View {
     var body: some View {
         NavigationStack {
             LoginWebView()
-                .navigationTitle("Instagram'a Giriş")
+                .navigationTitle("Instagram Hesabıyla Giriş")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Vazgeç") { dismiss() }
