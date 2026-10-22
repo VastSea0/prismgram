@@ -2,6 +2,7 @@
 .swiftpm/
 *.xcodeproj/xcuserdata/
 Instagram.app/
+Prismgram.app/
 .DS_Store
 *.png
 *.ips
