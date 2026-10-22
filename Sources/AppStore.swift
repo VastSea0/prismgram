@@ -557,6 +557,25 @@ final class AppStore {
         return IGJSON.string(paging?["max_id"])
     }
 
+    struct SearchResults {
+        struct Hashtag { let name: String; let mediaCount: Int }
+        var users: [IGUser] = []
+        var hashtags: [Hashtag] = []
+    }
+
+    /// Instagram's blended search: accounts first, then hashtags.
+    func search(_ query: String) async -> SearchResults {
+        guard let json = try? await fetch("/api/v1/web/search/topsearch/?context=blended&query=\(encode(query))&include_reel=true") else {
+            return SearchResults()
+        }
+        let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap { ($0["user"] as? [String: Any]).flatMap(IGJSON.user) }
+        let hashtags = ((json["hashtags"] as? [[String: Any]]) ?? []).compactMap { entry -> SearchResults.Hashtag? in
+            guard let tag = entry["hashtag"] as? [String: Any], let name = tag["name"] as? String else { return nil }
+            return SearchResults.Hashtag(name: name, mediaCount: IGJSON.int(tag["media_count"]) ?? 0)
+        }
+        return SearchResults(users: users, hashtags: hashtags)
+    }
+
     func loadActivity() async {
         guard activityPhase != .loading else { return }
         activityPhase = .loading

@@ -623,34 +623,144 @@ private struct StoryTrayCell: View {
 
 struct ExploreView: View {
     @Bindable var store: AppStore
-    @State private var filterText = ""
+    @State private var query = ""
+    @State private var results: AppStore.SearchResults?
+    @State private var isSearching = false
+    @State private var width: CGFloat = 0
 
-    private var filteredPosts: [IGPost] {
-        let q = filterText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return store.explore }
-        return store.explore.filter {
-            $0.user.username.lowercased().contains(q)
-                || $0.user.fullName.lowercased().contains(q)
-                || $0.caption.lowercased().contains(q)
-                || ($0.locationName?.lowercased().contains(q) ?? false)
+    private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        Group {
+            if trimmedQuery.isEmpty {
+                mosaic
+            } else {
+                searchResults
+            }
+        }
+        .searchable(text: $query, placement: .toolbar, prompt: "Ara")
+        .task(id: trimmedQuery) {
+            guard !trimmedQuery.isEmpty else {
+                results = nil
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            isSearching = true
+            let found = await store.search(trimmedQuery)
+            guard !Task.isCancelled else { return }
+            results = found
+            isSearching = false
         }
     }
 
-    var body: some View {
+    // MARK: Mosaic (groups of five: a 2x2 block and one tall tile, alternating sides)
+
+    private var mosaic: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: store.layoutMode == .phone ? 120 : 175), spacing: 2)], spacing: 2) {
-                ForEach(filteredPosts) { post in
-                    MediaGridTile(post: post) {
-                        store.detailPost = post
-                    }
+            let spacing: CGFloat = 2
+            let side = max(0, (width - spacing * 2) / 3)
+            let groups = stride(from: 0, to: store.explore.count, by: 5).map { Array(store.explore[$0..<min($0 + 5, store.explore.count)]) }
+            LazyVStack(spacing: spacing) {
+                ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                    mosaicGroup(group, tallOnRight: index.isMultiple(of: 2), side: side, spacing: spacing)
                 }
             }
-            .padding(2)
+            .frame(maxWidth: store.layoutMode == .phone ? .infinity : 935)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, store.layoutMode == .phone ? 70 : 0)
         }
-        .searchable(text: $filterText, prompt: "Keşfet'te filtrele…")
         .overlay {
             LoadStateView(phase: store.explorePhase, isEmpty: store.explore.isEmpty, emptyTitle: "Keşfet boş", emptySymbol: "magnifyingglass") {
                 Task { await store.refresh(.explore) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mosaicGroup(_ group: [IGPost], tallOnRight: Bool, side: CGFloat, spacing: CGFloat) -> some View {
+        if group.count < 5 {
+            HStack(spacing: spacing) {
+                ForEach(group) { tile($0, width: side, height: side) }
+                Spacer(minLength: 0)
+            }
+        } else {
+            let tall = group.first(where: \.isVideo) ?? group[4]
+            let small = group.filter { $0.id != tall.id }
+            HStack(spacing: spacing) {
+                if !tallOnRight { tile(tall, width: side, height: side * 2 + spacing) }
+                VStack(spacing: spacing) {
+                    HStack(spacing: spacing) { tile(small[0], width: side, height: side); tile(small[1], width: side, height: side) }
+                    HStack(spacing: spacing) { tile(small[2], width: side, height: side); tile(small[3], width: side, height: side) }
+                }
+                if tallOnRight { tile(tall, width: side, height: side * 2 + spacing) }
+            }
+        }
+    }
+
+    private func tile(_ post: IGPost, width: CGFloat, height: CGFloat) -> some View {
+        MediaGridTile(post: post, aspectRatio: width / max(height, 1)) { store.detailPost = post }
+            .frame(width: width, height: height)
+    }
+
+    // MARK: Search
+
+    private var searchResults: some View {
+        List {
+            if let results {
+                ForEach(results.users) { user in
+                    Button { store.openProfile(of: user) } label: {
+                        HStack(spacing: 12) {
+                            AvatarView(url: user.avatarURL, size: 44)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 4) {
+                                    Text(user.username).font(.system(size: 13.5, weight: .semibold))
+                                    if user.isVerified { VerifiedBadge(size: 11) }
+                                }
+                                let detail = [user.fullName, user.isFollowing == true ? "Takip ediliyor" : nil]
+                                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • ")
+                                if !detail.isEmpty {
+                                    Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                }
+                ForEach(results.hashtags, id: \.name) { tag in
+                    Button {
+                        NSWorkspace.shared.open(URL(string: "https://www.instagram.com/explore/tags/\(tag.name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? tag.name)/")!)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "number")
+                                .font(.system(size: 18))
+                                .frame(width: 44, height: 44)
+                                .overlay(Circle().strokeBorder(Color.igSeparator, lineWidth: 1))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("#\(tag.name)").font(.system(size: 13.5, weight: .semibold))
+                                if tag.mediaCount > 0 {
+                                    Text("\(tag.mediaCount.igCompact) gönderi").font(.system(size: 13)).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .overlay {
+            if isSearching && results == nil {
+                ProgressView()
+            } else if let results, results.users.isEmpty && results.hashtags.isEmpty {
+                ContentUnavailableView.search(text: trimmedQuery)
             }
         }
     }
