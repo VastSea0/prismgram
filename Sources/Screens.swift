@@ -602,33 +602,44 @@ struct ExploreView: View {
     }
 }
 
-/// Reusable 3:4 portrait grid tile matching the modern Instagram iOS profile & explore grid, with macOS hover stats.
+/// Grid tile of the Instagram for iOS profile and explore grids, with macOS hover stats.
 struct MediaGridTile: View {
     let post: IGPost
+    var aspectRatio: CGFloat = 3.0 / 4.0
+    var showsViewCount = false
+    var showsPin = false
     let action: () -> Void
     @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
             Color.clear
-                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                .aspectRatio(aspectRatio, contentMode: .fit)
                 .overlay {
                     RemoteImage(url: post.items.first?.thumbURL, maxPixelSize: 480)
                         .scaleEffect(isHovered ? 1.03 : 1.0)
-                        .animation(.easeOut(duration: 0.22), value: isHovered)
                 }
                 .overlay(alignment: .topTrailing) {
-                    if post.isVideo {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                            .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
-                            .padding(8)
-                    } else if post.items.count > 1 {
-                        Image(systemName: "square.fill.on.square.fill")
+                    Group {
+                        if showsPin && post.isPinned {
+                            Image(systemName: "pin.fill").rotationEffect(.degrees(45))
+                        } else if post.isVideo && !showsViewCount {
+                            Image(systemName: "play.rectangle.fill")
+                        } else if post.items.count > 1 {
+                            Image(systemName: "square.fill.on.square.fill")
+                        }
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+                    .padding(8)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    if showsViewCount, let views = post.viewCount {
+                        Label(views.igCompact, systemImage: "play")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white)
-                            .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+                            .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
                             .padding(8)
                     }
                 }
@@ -637,8 +648,8 @@ struct MediaGridTile: View {
                         Color.black.opacity(0.38)
                             .overlay {
                                 HStack(spacing: 16) {
-                                    Label(post.likeCount.formatted(.number.notation(.compactName)), systemImage: "heart.fill")
-                                    Label(post.commentCount.formatted(.number.notation(.compactName)), systemImage: "bubble.right.fill")
+                                    Label(post.likeCount.igCompact, systemImage: "heart.fill")
+                                    Label(post.commentCount.igCompact, systemImage: "bubble.right.fill")
                                 }
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundStyle(.white)
@@ -647,10 +658,11 @@ struct MediaGridTile: View {
                     }
                 }
                 .clipped()
+                .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.15)) {
+            withAnimation(.easeOut(duration: 0.18)) {
                 isHovered = hovering
             }
         }
@@ -1406,149 +1418,6 @@ private struct MessageBubbleRow: View {
             if !message.isFromViewer {
                 Spacer(minLength: 60)
             }
-        }
-    }
-}
-
-// MARK: - Profile (iOS Instagram layout + 3:4 grid)
-
-struct ProfileView: View {
-    @Bindable var store: AppStore
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                if let user = store.profile {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 22) {
-                            AvatarView(
-                                url: user.avatarURL,
-                                size: 84,
-                                ring: store.profileHighlights.isEmpty ? .none : .seen
-                            )
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack(spacing: 26) {
-                                    stat(user.mediaCount ?? store.profilePosts.count, "gönderi")
-                                    stat(user.followerCount, "takipçi")
-                                    stat(user.followingCount, "takip")
-                                }
-
-                                if user.id != store.viewerID, let isFollowing = user.isFollowing {
-                                    HStack(spacing: 8) {
-                                        if isFollowing {
-                                            Button("Takipten Çık") { store.toggleFollow(user) }
-                                                .buttonStyle(.glass)
-                                                .controlSize(.small)
-                                        } else {
-                                            Button("Takip Et") { store.toggleFollow(user) }
-                                                .buttonStyle(.glassProminent)
-                                                .controlSize(.small)
-                                        }
-                                        Button("Mesaj") {
-                                            store.select(.direct)
-                                        }
-                                        .buttonStyle(.glass)
-                                        .controlSize(.small)
-                                    }
-                                }
-                            }
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 4) {
-                                Text(user.fullName.isEmpty ? user.username : user.fullName)
-                                    .font(.system(size: 14.5, weight: .semibold))
-                                if user.isVerified {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.blue)
-                                }
-                            }
-                            Text("@\(user.username)")
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(.secondary)
-                            if !user.biography.isEmpty {
-                                Text(user.biography)
-                                    .font(.system(size: 13))
-                                    .padding(.top, 2)
-                            }
-                            if let link = user.externalURL {
-                                Link(destination: link) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "link")
-                                        Text(link.host ?? link.absoluteString)
-                                            .lineLimit(1)
-                                    }
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                }
-                                .padding(.top, 2)
-                            }
-                        }
-
-                        if !store.profileHighlights.isEmpty {
-                            ScrollView(.horizontal) {
-                                LazyHStack(spacing: 14) {
-                                    ForEach(store.profileHighlights) { highlight in
-                                        Button {
-                                            store.openStory(highlight)
-                                        } label: {
-                                            VStack(spacing: 5) {
-                                                AvatarView(url: highlight.coverURL ?? user.avatarURL, size: 56, ring: .seen)
-                                                Text(highlight.title ?? "Öne Çıkan")
-                                                    .font(.system(size: 11))
-                                                    .lineLimit(1)
-                                                    .frame(width: 66)
-                                            }
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                                .padding(.vertical, 4)
-                            }
-                            .scrollIndicators(.hidden)
-                        }
-                    }
-                    .frame(maxWidth: 620, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 14)
-
-                    Divider().opacity(0.6)
-
-                    if store.profilePosts.isEmpty && user.isPrivate && user.isFollowing != true && user.id != store.viewerID {
-                        ContentUnavailableView(
-                            "Bu Hesap Gizli",
-                            systemImage: "lock.fill",
-                            description: Text("Fotoğraf ve videolarını görmek için bu hesabı takip edin.")
-                        )
-                        .padding(.top, 28)
-                    } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: store.layoutMode == .phone ? 120 : 175), spacing: 2)], spacing: 2) {
-                            ForEach(store.profilePosts) { post in
-                                MediaGridTile(post: post) {
-                                    store.detailPost = post
-                                }
-                            }
-                        }
-                        .padding(2)
-                    }
-                }
-            }
-        }
-        .overlay {
-            LoadStateView(phase: store.profilePhase, isEmpty: store.profile == nil, emptyTitle: "Profil bulunamadı", emptySymbol: "person.crop.circle") {
-                Task { await store.refresh(.profile) }
-            }
-        }
-    }
-
-    private func stat(_ value: Int?, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value.map { $0.formatted(.number.notation(.compactName)) } ?? "–")
-                .font(.system(size: 15, weight: .bold))
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
         }
     }
 }

@@ -87,6 +87,50 @@ enum InstagramTab: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum ProfileSection: String, CaseIterable, Identifiable, Sendable {
+    case posts
+    case reels
+    case tagged
+    case saved
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .posts: return "Gönderiler"
+        case .reels: return "Reels"
+        case .tagged: return "Etiketlenenler"
+        case .saved: return "Kaydedilenler"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .posts: return "squareshape.split.3x3"
+        case .reels: return "play.rectangle"
+        case .tagged: return "person.crop.square"
+        case .saved: return "bookmark"
+        }
+    }
+
+    var filledSymbolName: String {
+        switch self {
+        case .posts: return "squareshape.split.3x3"
+        case .reels: return "play.rectangle.fill"
+        case .tagged: return "person.crop.square.fill"
+        case .saved: return "bookmark.fill"
+        }
+    }
+}
+
+enum FollowListKind: String, Identifiable, Sendable {
+    case followers
+    case following
+
+    var id: String { rawValue }
+    var title: String { self == .followers ? "Takipçiler" : "Takip Edilenler" }
+}
+
 // MARK: - Domain models (all values come from the signed-in account's own responses)
 
 struct IGUser: Identifiable, Hashable, Sendable {
@@ -102,6 +146,26 @@ struct IGUser: Identifiable, Hashable, Sendable {
     var mediaCount: Int?
     var isPrivate: Bool = false
     var isFollowing: Bool? = nil
+    var isRequested: Bool = false
+    var followsViewer: Bool = false
+    var category: String? = nil
+    var mutualFollowers: [String] = []
+    var mutualFollowerCount: Int = 0
+
+    /// Fills the gaps in a freshly fetched user with what an older, partial copy already knew.
+    func merged(over older: IGUser?) -> IGUser {
+        guard let older, older.id == id else { return self }
+        var result = self
+        if result.avatarURL == nil { result.avatarURL = older.avatarURL }
+        if result.fullName.isEmpty { result.fullName = older.fullName }
+        if result.followerCount == nil { result.followerCount = older.followerCount }
+        if result.followingCount == nil { result.followingCount = older.followingCount }
+        if result.mediaCount == nil { result.mediaCount = older.mediaCount }
+        if result.isFollowing == nil { result.isFollowing = older.isFollowing }
+        if result.biography.isEmpty { result.biography = older.biography }
+        if result.externalURL == nil { result.externalURL = older.externalURL }
+        return result
+    }
 }
 
 struct IGMediaItem: Identifiable, Hashable, Sendable {
@@ -110,6 +174,9 @@ struct IGMediaItem: Identifiable, Hashable, Sendable {
     let imageURL: URL?
     let videoURL: URL?
     let aspectRatio: Double
+    var takenAt: Date? = nil
+    /// Seconds, for videos.
+    var duration: Double? = nil
 }
 
 struct IGPost: Identifiable, Hashable, Sendable {
@@ -124,6 +191,8 @@ struct IGPost: Identifiable, Hashable, Sendable {
     var commentCount: Int
     var hasLiked: Bool
     var hasSaved: Bool
+    var viewCount: Int? = nil
+    var isPinned: Bool = false
 
     var isVideo: Bool { items.first?.videoURL != nil }
 }
@@ -235,7 +304,41 @@ enum IGJSON {
             followingCount: int(dict["following_count"]),
             mediaCount: int(dict["media_count"]),
             isPrivate: bool(dict["is_private"]) ?? false,
-            isFollowing: bool(friendship?["following"])
+            isFollowing: bool(friendship?["following"]),
+            isRequested: bool(friendship?["outgoing_request"]) ?? false,
+            followsViewer: bool(friendship?["followed_by"]) ?? false,
+            category: (dict["category"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        )
+    }
+
+    /// The user object returned by `/api/v1/users/web_profile_info/`, which uses GraphQL field names.
+    static func graphUser(_ dict: [String: Any]) -> IGUser? {
+        guard let username = dict["username"] as? String,
+              let id = string(dict["id"]) ?? string(dict["pk"]) else { return nil }
+        func count(_ key: String) -> Int? { int((dict[key] as? [String: Any])?["count"]) }
+        let mutual = dict["edge_mutual_followed_by"] as? [String: Any]
+        let mutualNames = ((mutual?["edges"] as? [[String: Any]]) ?? []).compactMap {
+            ($0["node"] as? [String: Any])?["username"] as? String
+        }
+        let bioLink = ((dict["bio_links"] as? [[String: Any]])?.first)?["url"]
+        return IGUser(
+            id: id,
+            username: username,
+            fullName: (dict["full_name"] as? String) ?? "",
+            avatarURL: url(dict["profile_pic_url_hd"]) ?? url(dict["profile_pic_url"]),
+            isVerified: bool(dict["is_verified"]) ?? false,
+            biography: (dict["biography"] as? String) ?? "",
+            externalURL: url(dict["external_url"]) ?? url(bioLink),
+            followerCount: count("edge_followed_by"),
+            followingCount: count("edge_follow"),
+            mediaCount: count("edge_owner_to_timeline_media"),
+            isPrivate: bool(dict["is_private"]) ?? false,
+            isFollowing: bool(dict["followed_by_viewer"]),
+            isRequested: bool(dict["requested_by_viewer"]) ?? false,
+            followsViewer: bool(dict["follows_viewer"]) ?? false,
+            category: (dict["category_name"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            mutualFollowers: mutualNames,
+            mutualFollowerCount: int(mutual?["count"]) ?? mutualNames.count
         )
     }
 
@@ -267,7 +370,9 @@ enum IGJSON {
             thumbURL: thumb ?? full,
             imageURL: full,
             videoURL: video,
-            aspectRatio: ratio
+            aspectRatio: ratio,
+            takenAt: double(dict["taken_at"]).map { Date(timeIntervalSince1970: $0) },
+            duration: double(dict["video_duration"])
         )
     }
 
@@ -299,7 +404,9 @@ enum IGJSON {
             likeCount: int(dict["like_count"]) ?? 0,
             commentCount: int(dict["comment_count"]) ?? 0,
             hasLiked: bool(dict["has_liked"]) ?? false,
-            hasSaved: bool(dict["has_viewer_saved"]) ?? false
+            hasSaved: bool(dict["has_viewer_saved"]) ?? false,
+            viewCount: int(dict["play_count"]) ?? int(dict["ig_play_count"]) ?? int(dict["view_count"]),
+            isPinned: !((dict["timeline_pinned_user_ids"] as? [Any]) ?? []).isEmpty
         )
     }
 

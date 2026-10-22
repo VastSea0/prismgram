@@ -132,12 +132,12 @@ struct ContentView: View {
         ToolbarItem(placement: .navigation) {
             Button {
                 store.closeOtherProfile()
-                Task { await store.ensureLoaded(.profile) }
             } label: {
                 Label("Geri", systemImage: "chevron.backward")
             }
-            .disabled(!(store.tab == .profile && store.profileUserID != nil))
-            .help("Kendi profiline dön")
+            .disabled(!store.canGoBack)
+            .keyboardShortcut("[", modifiers: .command)
+            .help("Geri (⌘[)")
         }
 
         ToolbarItem(placement: .principal) {

@@ -22,6 +22,14 @@ final class AppStore {
         let message: String
     }
 
+    /// One paginated grid of posts.
+    struct PostPage {
+        var items: [IGPost] = []
+        var phase: Phase = .idle
+        var cursor: String?
+        var isLoadingMore = false
+    }
+
     let client = InstagramClient()
 
     // Session
@@ -41,6 +49,8 @@ final class AppStore {
     var profileUserID: String?
     var profileUsername: String?
     var storyViewer: IGStoryTray?
+    /// The trays the open story viewer moves through (the home tray or a profile's highlights).
+    private(set) var storyQueue: [IGStoryTray] = []
     var isLoadingStorySlides = false
     var detailPost: IGPost?
     var isShowingLogin = false
@@ -68,9 +78,19 @@ final class AppStore {
     private(set) var isSendingDirectMessage = false
 
     private(set) var profile: IGUser?
-    private(set) var profilePosts: [IGPost] = []
+    private(set) var profileGrids: [ProfileSection: PostPage] = [:]
+    var profileSection: ProfileSection = .posts
     private(set) var profileHighlights: [IGStoryTray] = []
     private(set) var profilePhase: Phase = .idle
+    /// Other people's profiles opened on top of each other, newest last; Back walks down this stack.
+    private(set) var profileStack: [IGUser] = []
+    private var profileReturnTab: InstagramTab?
+    private var profileToken = UUID()
+    /// Set when "Message" is pressed on a profile with no existing chat, so the inbox opens filtered to that person.
+    var pendingDirectSearch: String?
+
+    var profilePosts: [IGPost] { profileGrids[.posts]?.items ?? [] }
+    var isViewingOtherProfile: Bool { profileUserID != nil }
 
     init() {
         client.onNetworkEvent = { [weak self] event in
@@ -106,7 +126,8 @@ final class AppStore {
         reels = []; reelsPhase = .idle
         activity = []; activityPhase = .idle
         notes = []; directThreads = []; directPhase = .idle; selectedThreadID = nil
-        profile = nil; profilePosts = []; profileHighlights = []; profilePhase = .idle
+        profile = nil; profileGrids = [:]; profileHighlights = []; profilePhase = .idle
+        profileStack = []; profileReturnTab = nil; profileUserID = nil; profileUsername = nil
     }
 
     // MARK: Network Tap Handling
@@ -143,46 +164,6 @@ final class AppStore {
         case "IGDThreadDetailQuery":
             if let detailed = IGJSON.directThreadDetail(from: json) {
                 mergeDetailedThread(detailed)
-            }
-
-        case "PolarisProfilePageContentQuery":
-            if let dataDict = json["data"] as? [String: Any],
-               let userDict = dataDict["user"] as? [String: Any],
-               let parsedUser = IGJSON.user(userDict) {
-                let targetUsername = (profileUsername ?? viewerUsername)?.lowercased()
-                let targetID = profileUserID ?? viewerID
-                if parsedUser.id == targetID || parsedUser.username.lowercased() == targetUsername || profile == nil {
-                    profile = parsedUser
-                    if parsedUser.id == viewerID {
-                        viewerUsername = parsedUser.username
-                    }
-                    profilePhase = .loaded
-                }
-            }
-
-        case "PolarisProfilePostsQuery":
-            if let dataDict = json["data"] as? [String: Any],
-               let conn = dataDict["xdt_api__v1__feed__user_timeline_graphql_connection"] as? [String: Any],
-               let edges = conn["edges"] as? [[String: Any]] {
-                let posts = edges.compactMap { ($0["node"] as? [String: Any]).flatMap(IGJSON.post) }
-                if !posts.isEmpty {
-                    let owner = posts.first?.user
-                    let targetUsername = (profileUsername ?? viewerUsername)?.lowercased()
-                    let targetID = profileUserID ?? viewerID
-                    if owner?.id == targetID || owner?.username.lowercased() == targetUsername || profilePosts.isEmpty {
-                        profilePosts = posts
-                        if profile == nil, let owner {
-                            profile = owner
-                        }
-                        profilePhase = .loaded
-                    }
-                }
-            }
-
-        case "PolarisProfileStoryHighlightsTrayContentQuery":
-            let parsed = IGJSON.highlights(from: json, fallbackUser: profile)
-            if !parsed.isEmpty {
-                profileHighlights = parsed
             }
 
         default:
@@ -232,37 +213,77 @@ final class AppStore {
     func select(_ newTab: InstagramTab) {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         withAnimation(.snappy(duration: 0.25)) {
-            if newTab == .profile && tab != .profile {
-                profileUserID = nil
-                profileUsername = nil
-                profilePhase = .idle
+            if newTab == .profile && (tab != .profile || isViewingOtherProfile) {
+                showOwnProfile()
             }
             tab = newTab
         }
     }
 
+    private func showOwnProfile() {
+        guard isViewingOtherProfile || profile == nil || profile?.id != viewerID else { return }
+        profileStack = []
+        profileReturnTab = nil
+        profileUserID = nil
+        profileUsername = nil
+        resetProfileContent(placeholder: nil)
+    }
+
+    private func resetProfileContent(placeholder: IGUser?) {
+        profileToken = UUID()
+        profile = placeholder
+        profileGrids = [:]
+        profileHighlights = []
+        profileSection = .posts
+        profilePhase = .idle
+    }
+
     func openProfile(of user: IGUser) {
         detailPost = nil
         storyViewer = nil
-        let isOwn = user.id == viewerID
-        profileUserID = isOwn ? nil : user.id
-        profileUsername = isOwn ? viewerUsername ?? user.username : user.username
-        profilePhase = .idle
-        profile = user
-        profilePosts = []
-        profileHighlights = []
+        if user.id == viewerID {
+            if tab != .profile { profileReturnTab = tab }
+            showOwnProfile()
+            withAnimation(.snappy(duration: 0.25)) { tab = .profile }
+            Task { await ensureLoaded(.profile) }
+            return
+        }
+        guard profile?.id != user.id || tab != .profile else { return }
+        if tab != .profile {
+            profileReturnTab = tab
+            profileStack = []
+        } else if let current = profile, current.id != viewerID {
+            profileStack.append(current)
+        }
+        profileUserID = user.id
+        profileUsername = user.username
+        resetProfileContent(placeholder: user)
         withAnimation(.snappy(duration: 0.25)) { tab = .profile }
         Task { await loadProfile() }
     }
 
+    /// Back from someone's profile: to the profile opened before it, or to the tab it was opened from.
     func closeOtherProfile() {
+        if let previous = profileStack.popLast() {
+            profileUserID = previous.id
+            profileUsername = previous.username
+            resetProfileContent(placeholder: previous)
+            Task { await loadProfile() }
+            return
+        }
+        let destination = profileReturnTab
+        profileReturnTab = nil
         profileUserID = nil
         profileUsername = nil
-        profilePhase = .idle
-        profile = nil
-        profilePosts = []
-        profileHighlights = []
+        resetProfileContent(placeholder: nil)
+        if let destination, destination != .profile {
+            withAnimation(.snappy(duration: 0.25)) { tab = destination }
+        } else {
+            Task { await loadProfile() }
+        }
     }
+
+    var canGoBack: Bool { tab == .profile && isViewingOtherProfile }
 
     func ensureLoaded(_ tab: InstagramTab) async {
         guard session == .signedIn else { return }
@@ -382,7 +403,8 @@ final class AppStore {
 
     // MARK: Stories (own + other people's stories + highlights)
 
-    func openStory(_ tray: IGStoryTray) {
+    func openStory(_ tray: IGStoryTray, in queue: [IGStoryTray]? = nil) {
+        storyQueue = queue ?? [tray]
         markStorySeen(tray.id)
         storyViewer = tray
         if tray.slides.isEmpty {
@@ -541,77 +563,203 @@ final class AppStore {
     func loadProfile() async {
         guard profilePhase != .loading else { return }
         profilePhase = .loading
+        let token = profileToken
 
         let targetID = profileUserID ?? viewerID
-        var targetUsername = profileUsername ?? (targetID == viewerID ? viewerUsername : nil)
-
-        if targetUsername == nil, let id = targetID {
-            targetUsername = stories.first(where: { $0.user.id == id })?.user.username
-                ?? feed.first(where: { $0.user.id == id })?.user.username
-                ?? notes.first(where: { $0.user.id == id })?.user.username
-        }
-        if targetUsername == nil && targetID == viewerID {
-            targetUsername = await client.detectViewerUsername()
-            if let targetUsername { viewerUsername = targetUsername }
+        var username = profileUsername ?? (targetID == viewerID ? viewerUsername : nil)
+        if username == nil, targetID == viewerID, let detected = await client.detectViewerUsername() {
+            viewerUsername = detected
+            username = detected
         }
 
-        if let username = targetUsername, !username.isEmpty {
-            _ = await client.navigate(to: "/\(username)/")
-            for _ in 0..<20 {
-                try? await Task.sleep(for: .milliseconds(400))
-                if profile?.followerCount != nil && !profilePosts.isEmpty {
-                    profilePhase = .loaded
-                    return
-                }
+        var loaded: IGUser?
+        var failure: Error?
+        do {
+            if let username, !username.isEmpty {
+                let json = try await fetch("/api/v1/users/web_profile_info/?username=\(encode(username))")
+                loaded = ((json["data"] as? [String: Any])?["user"] as? [String: Any]).flatMap(IGJSON.graphUser)
             }
-        }
-
-        // Fallback to user feed endpoint if GraphQL tap hasn't populated posts yet
-        if let id = targetID {
-            if let feedJSON = try? await fetch("/api/v1/feed/user/\(id)/?count=18") {
-                let items = ((feedJSON["items"] as? [[String: Any]]) ?? []).compactMap(IGJSON.post)
-                if !items.isEmpty {
-                    profilePosts = items
-                    if profile == nil {
-                        profile = items.first?.user
-                    }
-                }
-                if let userDict = feedJSON["user"] as? [String: Any], let parsed = IGJSON.user(userDict), profile == nil {
-                    profile = parsed
-                }
+            if loaded == nil, let id = targetID {
+                let json = try await fetch("/api/v1/users/\(id)/info/")
+                loaded = (json["user"] as? [String: Any]).flatMap(IGJSON.user)
             }
+        } catch {
+            failure = error
         }
+        guard token == profileToken else { return }
 
-        if profile != nil || !profilePosts.isEmpty {
-            profilePhase = .loaded
+        guard let user = loaded?.merged(over: profile) else {
+            profilePhase = profile == nil ? .failed(failure.map(message(for:)) ?? "Profil bulunamadı.") : .loaded
+            return
+        }
+        profile = user
+        if user.id == viewerID { viewerUsername = user.username }
+        profilePhase = .loaded
+
+        Task { await loadHighlights(for: user.id, token: token) }
+        if canSeeContent(of: user) {
+            await loadProfileSection(profileSection)
+        }
+    }
+
+    func canSeeContent(of user: IGUser) -> Bool {
+        !user.isPrivate || user.isFollowing == true || user.id == viewerID
+    }
+
+    func availableSections(for user: IGUser) -> [ProfileSection] {
+        user.id == viewerID ? ProfileSection.allCases : [.posts, .reels, .tagged]
+    }
+
+    func selectProfileSection(_ section: ProfileSection) {
+        guard section != profileSection else { return }
+        withAnimation(.snappy(duration: 0.25)) { profileSection = section }
+        if profileGrids[section] == nil {
+            Task { await loadProfileSection(section) }
+        }
+    }
+
+    /// Loads the first page of a profile grid, or the next page when `more` is set.
+    func loadProfileSection(_ section: ProfileSection, more: Bool = false) async {
+        guard let user = profile, canSeeContent(of: user) else { return }
+        var page = profileGrids[section] ?? PostPage()
+        if more {
+            guard page.cursor != nil, !page.isLoadingMore, page.phase == .loaded else { return }
+            page.isLoadingMore = true
+            profileGrids[section] = page
         } else {
-            profilePhase = .failed("Profil bilgileri alınamadı. Birkaç saniye sonra yenileyin.")
+            guard page.phase != .loading else { return }
+            page = PostPage(phase: .loading)
+            profileGrids[section] = page
+        }
+        let token = profileToken
+        let cursor = more ? page.cursor : nil
+
+        do {
+            let (posts, next) = try await fetchSection(section, userID: user.id, cursor: cursor)
+            guard token == profileToken else { return }
+            var updated = profileGrids[section] ?? PostPage()
+            let known = Set(updated.items.map(\.id))
+            updated.items = more ? updated.items + posts.filter { !known.contains($0.id) } : posts
+            updated.cursor = next
+            updated.phase = .loaded
+            updated.isLoadingMore = false
+            profileGrids[section] = updated
+        } catch {
+            guard token == profileToken else { return }
+            var updated = profileGrids[section] ?? PostPage()
+            updated.isLoadingMore = false
+            if more {
+                updated.cursor = nil
+            } else {
+                updated.phase = .failed(message(for: error))
+            }
+            profileGrids[section] = updated
+        }
+    }
+
+    private func fetchSection(_ section: ProfileSection, userID: String, cursor: String?) async throws -> ([IGPost], String?) {
+        let maxID = cursor.map { "&max_id=\(encode($0))" } ?? ""
+        switch section {
+        case .posts:
+            let json = try await fetch("/api/v1/feed/user/\(userID)/?count=12\(maxID)")
+            let posts = ((json["items"] as? [[String: Any]]) ?? []).compactMap(IGJSON.post)
+            return (posts, Self.nextCursor(json))
+        case .reels:
+            let json = try await fetch(
+                "/api/v1/clips/user/",
+                method: "POST",
+                body: "target_user_id=\(encode(userID))&page_size=12&include_feed_video=true\(maxID)"
+            )
+            let paging = json["paging_info"] as? [String: Any]
+            let more = IGJSON.bool(paging?["more_available"]) ?? false
+            return (IGJSON.collectPosts(in: json["items"] ?? []), more ? IGJSON.string(paging?["max_id"]) : nil)
+        case .tagged:
+            let json = try await fetch("/api/v1/usertags/\(userID)/feed/?count=12\(maxID)")
+            return (IGJSON.collectPosts(in: json["items"] ?? []), Self.nextCursor(json))
+        case .saved:
+            let json = try await fetch("/api/v1/feed/saved/posts/?\(maxID.dropFirst())")
+            return (IGJSON.collectPosts(in: json["items"] ?? []), Self.nextCursor(json))
+        }
+    }
+
+    private static func nextCursor(_ json: [String: Any]) -> String? {
+        guard IGJSON.bool(json["more_available"]) ?? (json["next_max_id"] != nil) else { return nil }
+        return IGJSON.string(json["next_max_id"])
+    }
+
+    private func loadHighlights(for userID: String, token: UUID) async {
+        guard let json = try? await fetch("/api/v1/highlights/\(userID)/highlights_tray/"),
+              token == profileToken else { return }
+        let tray = ((json["tray"] as? [[String: Any]]) ?? []).compactMap(IGJSON.storyTray)
+        profileHighlights = tray.map { highlight in
+            var item = highlight
+            if item.title == nil { item.title = "Öne Çıkan" }
+            return item
         }
     }
 
     func toggleFollow(_ user: IGUser) {
-        guard let current = user.isFollowing else { return }
-        let target = !current
+        let isOn = user.isFollowing == true || user.isRequested
+        let target = !isOn
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-        if profile?.id == user.id {
-            profile?.isFollowing = target
-            if let count = profile?.followerCount {
-                profile?.followerCount = max(0, count + (target ? 1 : -1))
+        updateProfile(user.id) {
+            if target && $0.isPrivate {
+                $0.isRequested = true
+            } else {
+                if $0.isFollowing == true, let count = $0.followerCount { $0.followerCount = max(0, count - 1) }
+                if target, let count = $0.followerCount { $0.followerCount = count + 1 }
+                $0.isFollowing = target
+                $0.isRequested = false
             }
         }
         Task {
             do {
-                _ = try await fetch(
+                let json = try await fetch(
                     "/api/v1/friendships/\(target ? "create" : "destroy")/\(user.id)/",
                     method: "POST",
-                    body: "user_id=\(encode(user.id))"
+                    body: "container_module=profile&user_id=\(encode(user.id))"
                 )
+                if let status = json["friendship_status"] as? [String: Any] {
+                    updateProfile(user.id) {
+                        $0.isFollowing = IGJSON.bool(status["following"]) ?? $0.isFollowing
+                        $0.isRequested = IGJSON.bool(status["outgoing_request"]) ?? $0.isRequested
+                    }
+                }
             } catch {
-                if profile?.id == user.id {
-                    profile?.isFollowing = current
+                updateProfile(user.id) {
+                    $0.isFollowing = user.isFollowing
+                    $0.isRequested = user.isRequested
+                    $0.followerCount = user.followerCount
                 }
             }
         }
+    }
+
+    private func updateProfile(_ id: String, _ change: (inout IGUser) -> Void) {
+        if var current = profile, current.id == id {
+            change(&current)
+            profile = current
+        }
+    }
+
+    /// Followers or following of a user, one page at a time.
+    func loadFollowList(userID: String, kind: FollowListKind, cursor: String?) async throws -> ([IGUser], String?) {
+        var path = "/api/v1/friendships/\(userID)/\(kind.rawValue)/?count=24"
+        if kind == .followers { path += "&search_surface=follow_list_page" }
+        if let cursor { path += "&max_id=\(encode(cursor))" }
+        let json = try await fetch(path)
+        let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap(IGJSON.user)
+        return (users, IGJSON.string(json["next_max_id"]))
+    }
+
+    /// Opens the chat with a user from their profile, or the inbox filtered to them when there is none yet.
+    func openDirect(with user: IGUser) {
+        if let existing = directThreads.first(where: { !$0.isGroup && $0.users.first?.id == user.id }) {
+            selectThread(existing)
+        } else {
+            pendingDirectSearch = user.username
+        }
+        select(.direct)
     }
 
     func loadComments(for postID: String) async throws -> [IGComment] {
@@ -625,14 +773,18 @@ final class AppStore {
         feed.first(where: { $0.id == id })
             ?? explore.first(where: { $0.id == id })
             ?? reels.first(where: { $0.id == id })
-            ?? profilePosts.first(where: { $0.id == id })
+            ?? profileGrids.values.lazy.compactMap { $0.items.first(where: { $0.id == id }) }.first
     }
 
     private func mutate(_ id: String, _ change: (inout IGPost) -> Void) {
         if let index = feed.firstIndex(where: { $0.id == id }) { change(&feed[index]) }
         if let index = explore.firstIndex(where: { $0.id == id }) { change(&explore[index]) }
         if let index = reels.firstIndex(where: { $0.id == id }) { change(&reels[index]) }
-        if let index = profilePosts.firstIndex(where: { $0.id == id }) { change(&profilePosts[index]) }
+        for section in profileGrids.keys {
+            if let index = profileGrids[section]?.items.firstIndex(where: { $0.id == id }) {
+                change(&profileGrids[section]!.items[index])
+            }
+        }
         if var open = detailPost, open.id == id {
             change(&open)
             detailPost = open
