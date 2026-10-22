@@ -121,32 +121,47 @@ struct PlayerSurface: NSViewRepresentable {
     }
 }
 
-struct InlineVideo: View {
+/// A looping, chrome-less video like Instagram's feed and Reels. The player is released when the view
+/// leaves the screen so a long feed does not keep dozens of decoders alive.
+struct LoopingVideo: View {
     let url: URL
-    var autoplay = false
-    var muted = true
-    var showsControls = true
+    var isPlaying: Bool
+    var isMuted: Bool
     var fillsFrame = true
 
-    @State private var player: AVPlayer?
+    @State private var player: AVQueuePlayer?
+    @State private var looper: AVPlayerLooper?
 
     var body: some View {
-        Group {
+        ZStack {
+            Color.black
             if let player {
-                PlayerSurface(player: player, showsControls: showsControls, fillsFrame: fillsFrame)
-            } else {
-                Color.black
+                PlayerSurface(player: player, showsControls: false, fillsFrame: fillsFrame)
+                    .allowsHitTesting(false)
             }
         }
         .onAppear {
             if player == nil {
-                let newPlayer = AVPlayer(url: url)
-                newPlayer.isMuted = muted
-                player = newPlayer
+                let queue = AVQueuePlayer()
+                looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: url))
+                player = queue
             }
-            if autoplay { player?.play() }
+            apply()
         }
-        .onDisappear { player?.pause() }
+        .onDisappear {
+            player?.pause()
+            looper?.disableLooping()
+            looper = nil
+            player = nil
+        }
+        .onChange(of: isPlaying) { _, _ in apply() }
+        .onChange(of: isMuted) { _, _ in apply() }
+    }
+
+    private func apply() {
+        guard let player else { return }
+        player.isMuted = isMuted
+        if isPlaying { player.play() } else { player.pause() }
     }
 }
 
@@ -184,94 +199,143 @@ struct LoadStateView: View {
 struct MediaPager: View {
     let items: [IGMediaItem]
     @Binding var currentIndex: Int
+    var isVisible = true
     var onDoubleTap: () -> Void = {}
 
+    @AppStorage("feedVideosMuted") private var isMuted = true
     @State private var pageID: String?
+    @State private var isHovering = false
     @State private var showHeartBurst = false
     @State private var heartScale: CGFloat = 0.3
     @State private var heartOpacity: Double = 0
 
+    /// Instagram sizes the whole carousel by its first item.
     private var ratio: Double { items.first?.aspectRatio ?? 1 }
+    private var current: IGMediaItem? { items[safe: currentIndex] }
 
     var body: some View {
-        ZStack {
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 0) {
-                    ForEach(items) { item in
-                        Group {
-                            if let video = item.videoURL {
-                                InlineVideo(url: video)
-                            } else {
-                                RemoteImage(url: item.imageURL)
+        Color.clear
+            .aspectRatio(ratio, contentMode: .fit)
+            .overlay {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            Group {
+                                if let video = item.videoURL {
+                                    LoopingVideo(url: video, isPlaying: isVisible && index == currentIndex, isMuted: isMuted)
+                                } else {
+                                    RemoteImage(url: item.imageURL)
+                                }
                             }
+                            .containerRelativeFrame([.horizontal, .vertical])
+                            .clipped()
+                            .id(item.id)
                         }
-                        .containerRelativeFrame(.horizontal)
-                        .aspectRatio(ratio, contentMode: .fit)
-                        .clipped()
-                        .id(item.id)
                     }
+                    .scrollTargetLayout()
                 }
-                .scrollTargetLayout()
+                .scrollTargetBehavior(.paging)
+                .scrollIndicators(.never)
+                .scrollPosition(id: $pageID)
+                .scrollDisabled(items.count < 2)
             }
-            .scrollTargetBehavior(.paging)
-            .scrollIndicators(.hidden)
-            .scrollPosition(id: $pageID)
-            .onChange(of: pageID) { _, newValue in
-                if let newValue, let idx = items.firstIndex(where: { $0.id == newValue }) {
-                    withAnimation(.spring(duration: 0.25)) {
-                        currentIndex = idx
+            .clipped()
+            .overlay { heartBurst }
+            .overlay(alignment: .topTrailing) {
+                if items.count > 1 {
+                    Text("\(currentIndex + 1)/\(items.count)")
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.6), in: .capsule)
+                        .padding(12)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if current?.videoURL != nil {
+                    Button { isMuted.toggle() } label: {
+                        Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(Color(white: 0.15).opacity(0.8)))
                     }
-                }
-            }
-
-            if showHeartBurst {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 86, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color(red: 1.0, green: 0.24, blue: 0.38), Color(red: 0.98, green: 0.12, blue: 0.52)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .shadow(color: .black.opacity(0.35), radius: 16, y: 6)
-                    .scaleEffect(heartScale)
-                    .opacity(heartOpacity)
-                    .allowsHitTesting(false)
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if items.count > 1 {
-                Text("\(currentIndex + 1)/\(items.count)")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(.black.opacity(0.62), in: .capsule)
+                    .buttonStyle(.plain)
                     .padding(12)
+                }
             }
+            .overlay {
+                if isHovering && items.count > 1 {
+                    HStack {
+                        pageButton("chevron.left", enabled: currentIndex > 0) { go(to: currentIndex - 1) }
+                        Spacer()
+                        pageButton("chevron.right", enabled: currentIndex < items.count - 1) { go(to: currentIndex + 1) }
+                    }
+                    .padding(.horizontal, 10)
+                    .transition(.opacity)
+                }
+            }
+            .contentShape(.rect)
+            .onTapGesture(count: 2) {
+                onDoubleTap()
+                triggerHeartBurst()
+            }
+            .onHover { hovering in withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering } }
+            .onChange(of: pageID) { _, newValue in
+                if let newValue, let index = items.firstIndex(where: { $0.id == newValue }) {
+                    currentIndex = index
+                    ImagePipeline.shared.prefetch([items[safe: index + 1]?.imageURL], maxPixelSize: 1080)
+                }
+            }
+    }
+
+    private func go(to index: Int) {
+        guard let target = items[safe: index] else { return }
+        withAnimation(.snappy(duration: 0.3)) { pageID = target.id }
+    }
+
+    private func pageButton(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.black.opacity(0.75))
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(.white.opacity(0.85)))
+                .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
         }
-        .contentShape(.rect)
-        .onTapGesture(count: 2) {
-            onDoubleTap()
-            triggerHeartBurst()
+        .buttonStyle(PressableButtonStyle(scale: 0.88))
+        .opacity(enabled ? 1 : 0)
+        .disabled(!enabled)
+    }
+
+    @ViewBuilder
+    private var heartBurst: some View {
+        if showHeartBurst {
+            Image(systemName: "heart.fill")
+                .font(.system(size: 92))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.3), radius: 14, y: 4)
+                .scaleEffect(heartScale)
+                .opacity(heartOpacity)
+                .allowsHitTesting(false)
         }
     }
 
     private func triggerHeartBurst() {
         showHeartBurst = true
-        heartScale = 0.35
+        heartScale = 0.2
         heartOpacity = 1.0
-        withAnimation(.spring(duration: 0.38, bounce: 0.48)) {
-            heartScale = 1.08
+        withAnimation(.spring(duration: 0.35, bounce: 0.5)) {
+            heartScale = 1.0
         }
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(520))
-            withAnimation(.easeOut(duration: 0.22)) {
+            try? await Task.sleep(for: .milliseconds(600))
+            withAnimation(.easeIn(duration: 0.2)) {
                 heartOpacity = 0
-                heartScale = 1.24
+                heartScale = 0.6
             }
-            try? await Task.sleep(for: .milliseconds(240))
+            try? await Task.sleep(for: .milliseconds(220))
             showHeartBurst = false
         }
     }
@@ -284,6 +348,7 @@ struct PostView: View {
 
     @State private var isCaptionExpanded = false
     @State private var currentSlide = 0
+    @State private var isOnScreen = false
 
     var body: some View {
         let isPhone = store.layoutMode == .phone
@@ -292,9 +357,10 @@ struct PostView: View {
             header
                 .padding(.horizontal, 14)
 
-            MediaPager(items: post.items, currentIndex: $currentSlide) {
+            MediaPager(items: post.items, currentIndex: $currentSlide, isVisible: isOnScreen) {
                 if !post.hasLiked { store.toggleLike(post) }
             }
+            .onScrollVisibilityChange(threshold: 0.6) { isOnScreen = $0 }
             .clipShape(.rect(cornerRadius: isPhone ? 0 : 10))
             .overlay {
                 if !isPhone {
@@ -410,7 +476,7 @@ struct PostView: View {
                     ForEach(post.items.indices, id: \.self) { idx in
                         let active = idx == currentSlide
                         Circle()
-                            .fill(active ? Color.accentColor : Color.secondary.opacity(0.32))
+                            .fill(active ? Color.igBlue : Color.secondary.opacity(0.32))
                             .frame(width: active ? 6 : 4.5, height: active ? 6 : 4.5)
                             .animation(.spring(duration: 0.22), value: currentSlide)
                     }
@@ -424,7 +490,7 @@ struct PostView: View {
                     }
                 } label: {
                     Image(systemName: post.hasLiked ? "heart.fill" : "heart")
-                        .foregroundStyle(post.hasLiked ? Color(red: 1.0, green: 0.19, blue: 0.25) : Color.primary)
+                        .foregroundStyle(post.hasLiked ? Color.igLike : Color.primary)
                         .symbolEffect(.bounce, value: post.hasLiked)
                 }
 
@@ -478,7 +544,7 @@ struct HomeView: View {
                 ForEach(store.feed) { post in
                     PostView(post: post, store: store)
                         .onAppear {
-                            if post.id == store.feed.last?.id {
+                            if post.id == store.feed.dropLast(3).last?.id || post.id == store.feed.last?.id {
                                 Task { await store.loadMoreFeed() }
                             }
                         }
@@ -661,20 +727,29 @@ struct MediaGridTile: View {
 
 struct ReelsView: View {
     @Bindable var store: AppStore
+    @State private var activeID: String?
+    @AppStorage("reelsMuted") private var isMuted = false
 
     var body: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(store.reels) { reel in
-                    ReelPage(reel: reel, store: store)
-                        .containerRelativeFrame(.vertical)
+                    ReelPage(reel: reel, store: store, isActive: reel.id == (activeID ?? store.reels.first?.id), isMuted: $isMuted)
+                        .containerRelativeFrame([.horizontal, .vertical])
+                        .id(reel.id)
+                        .onAppear {
+                            if reel.id == store.reels.dropLast(2).last?.id {
+                                Task { await store.loadMoreReels() }
+                            }
+                        }
                 }
             }
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
-        .scrollIndicators(.hidden)
-        .background(.black)
+        .scrollIndicators(.never)
+        .scrollPosition(id: $activeID)
+        .background(store.layoutMode == .phone ? Color.black : Color.clear)
         .overlay {
             LoadStateView(phase: store.reelsPhase, isEmpty: store.reels.isEmpty, emptyTitle: "Reels bulunamadı", emptySymbol: "play.rectangle") {
                 Task { await store.refresh(.reels) }
@@ -686,92 +761,158 @@ struct ReelsView: View {
 struct ReelPage: View {
     let reel: IGPost
     @Bindable var store: AppStore
+    let isActive: Bool
+    @Binding var isMuted: Bool
+
+    @State private var isPaused = false
+    @State private var flashSymbol: String?
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            if let url = reel.items.first?.videoURL {
-                InlineVideo(url: url, autoplay: true, muted: false, fillsFrame: false)
+        GeometryReader { geo in
+            let immersive = store.layoutMode == .phone || geo.size.width < 560
+            if immersive {
+                video
+                    .overlay(alignment: .bottom) { overlayChrome(light: true) }
             } else {
-                Color.black
-            }
-
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.65)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-            .frame(height: 220)
-            .allowsHitTesting(false)
-
-            HStack(alignment: .bottom, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Button { store.openProfile(of: reel.user) } label: {
-                        HStack(spacing: 9) {
-                            AvatarView(url: reel.user.avatarURL, size: 32)
-                            Text(reel.user.username)
-                                .font(.system(size: 14, weight: .semibold))
-                            if reel.user.isVerified {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    if !reel.caption.isEmpty {
-                        Text(reel.caption)
-                            .font(.system(size: 13))
-                            .lineLimit(2)
-                    }
+                let height = geo.size.height - 32
+                let width = (height * 9 / 16).rounded()
+                HStack(alignment: .bottom, spacing: 18) {
+                    video
+                        .frame(width: width, height: height)
+                        .clipShape(.rect(cornerRadius: 8, style: .continuous))
+                        .overlay(alignment: .bottomLeading) { caption.padding(16) }
+                    actions(light: false)
+                        .padding(.bottom, 8)
                 }
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
-                .padding(.bottom, store.layoutMode == .phone ? 64 : 24)
-
-                Spacer()
-
-                VStack(spacing: 14) {
-                    Button {
-                        withAnimation(.spring(duration: 0.3, bounce: 0.5)) {
-                            store.toggleLike(reel)
-                        }
-                    } label: {
-                        VStack(spacing: 3) {
-                            Image(systemName: reel.hasLiked ? "heart.fill" : "heart")
-                                .font(.system(size: 20))
-                                .foregroundStyle(reel.hasLiked ? Color(red: 1.0, green: 0.19, blue: 0.25) : Color.primary)
-                                .symbolEffect(.bounce, value: reel.hasLiked)
-                            Text(reel.likeCount.formatted(.number.notation(.compactName)))
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .frame(width: 46, height: 52)
-                    }
-                    Button { store.detailPost = reel } label: {
-                        VStack(spacing: 3) {
-                            Image(systemName: "bubble.right")
-                                .font(.system(size: 19))
-                            Text(reel.commentCount.formatted(.number.notation(.compactName)))
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .frame(width: 46, height: 52)
-                    }
-                    Button {
-                        withAnimation(.spring(duration: 0.28, bounce: 0.4)) {
-                            store.toggleSave(reel)
-                        }
-                    } label: {
-                        Image(systemName: reel.hasSaved ? "bookmark.fill" : "bookmark")
-                            .font(.system(size: 18))
-                            .frame(width: 46, height: 38)
-                            .symbolEffect(.bounce, value: reel.hasSaved)
-                    }
-                }
-                .buttonStyle(.glass)
-                .padding(.bottom, store.layoutMode == .phone ? 64 : 24)
+                .padding(.leading, 64)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 16)
         }
+    }
+
+    private var video: some View {
+        ZStack {
+            if let url = reel.items.first?.videoURL {
+                LoopingVideo(url: url, isPlaying: isActive && !isPaused, isMuted: isMuted)
+            } else {
+                RemoteImage(url: reel.items.first?.imageURL)
+            }
+            if let flashSymbol {
+                Image(systemName: flashSymbol)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 68, height: 68)
+                    .background(Circle().fill(.black.opacity(0.45)))
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
+        .contentShape(.rect)
+        .onTapGesture(count: 2) {
+            if !reel.hasLiked { store.toggleLike(reel) }
+            flash("heart.fill")
+        }
+        .onTapGesture {
+            isMuted.toggle()
+            flash(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        }
+        .onLongPressGesture(minimumDuration: 0.25) {} onPressingChanged: { pressing in
+            isPaused = pressing
+        }
+        .onChange(of: isActive) { _, active in if active { isPaused = false } }
+    }
+
+    private func flash(_ symbol: String) {
+        withAnimation(.spring(duration: 0.25, bounce: 0.3)) { flashSymbol = symbol }
+        Task {
+            try? await Task.sleep(for: .milliseconds(650))
+            withAnimation(.easeOut(duration: 0.2)) { flashSymbol = nil }
+        }
+    }
+
+    private func overlayChrome(light: Bool) -> some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            caption
+            Spacer(minLength: 0)
+            actions(light: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, store.layoutMode == .phone ? 76 : 20)
+        .padding(.top, 120)
+        .background(
+            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
+        )
+    }
+
+    private var caption: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { store.openProfile(of: reel.user) } label: {
+                HStack(spacing: 8) {
+                    AvatarView(url: reel.user.avatarURL, size: 30)
+                    Text(reel.user.username)
+                        .font(.system(size: 13.5, weight: .semibold))
+                    if reel.user.isVerified { VerifiedBadge(size: 11) }
+                }
+            }
+            .buttonStyle(.plain)
+
+            if !reel.caption.isEmpty {
+                Text(reel.caption)
+                    .font(.system(size: 13))
+                    .lineLimit(2)
+            }
+        }
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+    }
+
+    private func actions(light: Bool) -> some View {
+        VStack(spacing: 18) {
+            actionButton(reel.hasLiked ? "heart.fill" : "heart", count: reel.likeCount, tint: reel.hasLiked ? .igLike : nil, light: light) {
+                withAnimation(.spring(duration: 0.3, bounce: 0.5)) { store.toggleLike(reel) }
+            }
+            .symbolEffect(.bounce, value: reel.hasLiked)
+            actionButton("bubble.right", count: reel.commentCount, light: light) { store.detailPost = reel }
+            actionButton("paperplane", count: nil, light: light) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString("https://www.instagram.com/reel/\(reel.code)/", forType: .string)
+                flash("link")
+            }
+            actionButton(reel.hasSaved ? "bookmark.fill" : "bookmark", count: nil, light: light) {
+                withAnimation(.spring(duration: 0.28, bounce: 0.4)) { store.toggleSave(reel) }
+            }
+            .symbolEffect(.bounce, value: reel.hasSaved)
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://www.instagram.com/reel/\(reel.code)/")!)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 40, height: 24)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(light ? Color.white : Color.primary)
+            .help("Tarayıcıda Aç")
+        }
+        .shadow(color: light ? .black.opacity(0.3) : .clear, radius: 3, y: 1)
+    }
+
+    private func actionButton(_ symbol: String, count: Int?, tint: Color? = nil, light: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol)
+                    .font(.system(size: 24))
+                    .foregroundStyle(tint ?? (light ? Color.white : Color.primary))
+                if let count {
+                    Text(count.igCompact)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(light ? Color.white : Color.primary)
+                }
+            }
+            .frame(width: 44)
+            .contentShape(.rect)
+        }
+        .buttonStyle(PressableButtonStyle(scale: 0.85))
     }
 }
 

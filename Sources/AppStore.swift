@@ -67,6 +67,8 @@ final class AppStore {
 
     private(set) var reels: [IGPost] = []
     private(set) var reelsPhase: Phase = .idle
+    private var reelsCursor: String?
+    private var isLoadingMoreReels = false
 
     private(set) var activity: [IGActivity] = []
     private(set) var activityPhase: Phase = .idle
@@ -524,10 +526,35 @@ final class AppStore {
         do {
             let json = try await fetch("/api/v1/clips/discover/", method: "POST", body: "page_size=8&include_feed_video=true")
             reels = IGJSON.collectPosts(in: json).filter(\.isVideo)
+            reelsCursor = Self.reelsCursor(json)
             reelsPhase = .loaded
         } catch {
             reelsPhase = .failed(message(for: error))
         }
+    }
+
+    func loadMoreReels() async {
+        guard let cursor = reelsCursor, !isLoadingMoreReels, reelsPhase == .loaded else { return }
+        isLoadingMoreReels = true
+        defer { isLoadingMoreReels = false }
+        do {
+            let json = try await fetch(
+                "/api/v1/clips/discover/",
+                method: "POST",
+                body: "page_size=8&include_feed_video=true&max_id=\(encode(cursor))"
+            )
+            let known = Set(reels.map(\.id))
+            reels += IGJSON.collectPosts(in: json).filter { $0.isVideo && !known.contains($0.id) }
+            reelsCursor = Self.reelsCursor(json)
+        } catch {
+            reelsCursor = nil
+        }
+    }
+
+    private static func reelsCursor(_ json: [String: Any]) -> String? {
+        let paging = json["paging_info"] as? [String: Any]
+        guard IGJSON.bool(paging?["more_available"]) ?? false else { return nil }
+        return IGJSON.string(paging?["max_id"])
     }
 
     func loadActivity() async {
