@@ -264,33 +264,49 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         return result as? String
     }
 
-    /// Selects a direct message thread in the hidden inbox by matching its title or username, or navigating to `/direct/t/<threadID>/`.
-    func openDirectThread(threadID: String, title: String, username: String?) async {
-        let script = """
-        const nav = document.querySelector('div[role="navigation"]') || document.body;
-        const buttons = Array.from(nav.querySelectorAll('div[role="button"], a[role="link"]'));
-        const targets = [title, username].filter(Boolean).map(s => s.toLowerCase());
-        for (const btn of buttons) {
-            const text = (btn.innerText || '').toLowerCase();
-            if (targets.some(t => t && text.includes(t))) {
-                btn.click();
-                return 'clicked';
+    /// Opens a conversation in the hidden page by its address and confirms the page really shows it.
+    ///
+    /// Tries each candidate id in turn (the web app has used both the thread id and its FBID in URLs)
+    /// and returns the id whose page loaded with a composer, or nil. Never clicks list rows by name:
+    /// that once matched a different person whose name contained the same text.
+    func openDirectThread(ids: [String]) async -> String? {
+        var tried = Set<String>()
+        for id in ids where !id.isEmpty && tried.insert(id).inserted {
+            let path = "/direct/t/\(id)/"
+            if await currentPath() != path {
+                _ = await navigate(to: path)
+            }
+            for attempt in 0..<24 {
+                try? await Task.sleep(for: .milliseconds(250))
+                let state = await evaluate("""
+                return JSON.stringify({
+                    path: location.pathname,
+                    composer: !!document.querySelector('[contenteditable="true"][role="textbox"], div[role="main"] textarea')
+                });
+                """) as? String
+                guard let data = state?.data(using: .utf8),
+                      let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let current = info["path"] as? String else { continue }
+                if current.contains(id) {
+                    if info["composer"] as? Bool == true { return id }
+                } else if attempt > 8 {
+                    break // The app redirected away from this id; try the next one.
+                }
             }
         }
-        return 'not-found';
-        """
-        let res = (await evaluate(script, arguments: ["title": title, "username": username ?? ""]) as? String) ?? ""
-        if res != "clicked" {
-            _ = await navigate(to: "/direct/t/\(threadID)/")
-        }
+        return nil
     }
 
-    /// Types and sends a direct message in the currently open thread inside the hidden WebView.
-    func sendDirectMessage(text: String) async -> Bool {
+    func currentPath() async -> String? {
+        await evaluate("return location.pathname;") as? String
+    }
+
+    /// Types and sends a message in the hidden page, but only if it is still showing `/direct/t/<threadPathID>/`.
+    func sendDirectMessage(text: String, threadPathID: String) async -> Bool {
         let script = """
+        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
         const box = document.querySelector('[contenteditable="true"][role="textbox"]')
-            || document.querySelector('[contenteditable="true"]')
-            || document.querySelector('textarea');
+            || document.querySelector('div[role="main"] textarea');
         if (!box) { return false; }
         box.focus();
         if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
@@ -303,21 +319,21 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
         }
         await new Promise(r => setTimeout(r, 120));
-        const enterDown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
-        box.dispatchEvent(enterDown);
-        await new Promise(r => setTimeout(r, 100));
+        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
+        box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 150));
         const remaining = (box.innerText || box.value || '').trim();
         if (remaining.length > 0) {
-            const buttons = Array.from(document.querySelectorAll('div[role="button"], button'));
-            const sendBtn = buttons.find(b => {
-                const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+            const send = Array.from(document.querySelectorAll('div[role="button"], button')).find(b => {
+                const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
                 return t === 'send' || t === 'gönder';
             });
-            if (sendBtn) { sendBtn.click(); }
+            if (!send) { return false; }
+            send.click();
         }
         return true;
         """
-        return (await evaluate(script, arguments: ["text": text]) as? Bool) ?? false
+        return (await evaluate(script, arguments: ["text": text, "expected": threadPathID]) as? Bool) ?? false
     }
 
     func evaluate(_ script: String, arguments: [String: Any] = [:]) async -> Any? {

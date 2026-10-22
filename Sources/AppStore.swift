@@ -618,11 +618,8 @@ final class AppStore {
             directThreads[idx].isUnread = false
         }
         Task {
-            await client.openDirectThread(
-                threadID: thread.id,
-                title: thread.title,
-                username: thread.users.first?.username
-            )
+            // Opening it in the hidden page is what loads its messages (tapped IGDThreadDetailQuery).
+            _ = await client.openDirectThread(ids: [thread.threadFBID, thread.id])
         }
     }
 
@@ -663,11 +660,38 @@ final class AppStore {
             guard let thread = directThreads.first(where: { $0.id == threadID }) else { return }
             isSendingDirectMessage = true
             defer { isSendingDirectMessage = false }
-            await client.openDirectThread(threadID: thread.id, title: thread.title, username: thread.users.first?.username)
-            try? await Task.sleep(for: .milliseconds(350))
-            let sent = await client.sendDirectMessage(text: message.text)
+            let sent = await deliver(text: message.text, to: thread)
             setDelivery(sent ? .sent : .failed, for: message.id, in: threadID)
         }
+    }
+
+    /// Sends text to exactly this conversation. The recipient is always addressed by id; if that cannot
+    /// be guaranteed the message is reported as failed rather than risk it reaching someone else.
+    private func deliver(text: String, to thread: IGDirectThread) async -> Bool {
+        for id in Set([thread.id, thread.threadFBID]) where !id.isEmpty {
+            if await broadcast(kind: "text", fields: ["thread_ids": "[\"\(id)\"]", "text": text]) != nil {
+                return true
+            }
+        }
+        guard let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) else { return false }
+        return await client.sendDirectMessage(text: text, threadPathID: pathID)
+    }
+
+    /// Calls a `direct_v2/threads/broadcast/<kind>/` endpoint and returns its payload when Instagram answers `ok`.
+    /// Uses the client directly so that an unsupported endpoint can never sign the user out.
+    func broadcast(kind: String, fields: [String: String]) async -> [String: Any]? {
+        let token = String((0..<19).map { _ in "0123456789".randomElement()! })
+        var parameters = fields
+        parameters["action"] = parameters["action"] ?? "send_item"
+        parameters["client_context"] = token
+        parameters["mutation_token"] = token
+        parameters["offline_threading_id"] = token
+        let body = parameters.map { "\($0.key)=\(encode($0.value))" }.joined(separator: "&")
+        guard let response = try? await client.request("/api/v1/direct_v2/threads/broadcast/\(kind)/", method: "POST", body: body),
+              (200..<300).contains(response.status),
+              let json = response.json,
+              (json["status"] as? String) == "ok" else { return nil }
+        return json
     }
 
     private func setDelivery(_ delivery: IGDirectMessage.Delivery, for messageID: String, in threadID: String) {
