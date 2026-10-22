@@ -28,7 +28,7 @@ struct ProfileView: View {
                 }
                 .frame(maxWidth: isPhone ? .infinity : 935)
                 .frame(maxWidth: .infinity)
-                .padding(.bottom, isPhone ? 70 : 16)
+                .padding(.bottom, 16)
             }
         }
         .id(store.profile?.id)

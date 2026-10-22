@@ -60,6 +60,7 @@ final class AppStore {
     private var loadingStoryIDs: Set<String> = []
     var detailPost: IGPost?
     var isShowingLogin = false
+    var isShowingInstagramSettings = false
 
     // Data
     private(set) var stories: [IGStoryTray] = []

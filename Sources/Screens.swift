@@ -669,7 +669,6 @@ struct ExploreView: View {
             .frame(maxWidth: store.layoutMode == .phone ? .infinity : 935)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .frame(maxWidth: .infinity)
-            .padding(.bottom, store.layoutMode == .phone ? 70 : 0)
         }
         .overlay {
             LoadStateView(phase: store.explorePhase, isEmpty: store.explore.isEmpty, emptyTitle: "Keşfet boş", emptySymbol: "magnifyingglass") {
@@ -946,7 +945,7 @@ struct ReelPage: View {
             actions(light: true)
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, store.layoutMode == .phone ? 76 : 20)
+        .padding(.bottom, 20)
         .padding(.top, 120)
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)

@@ -114,7 +114,7 @@ struct MessagesView: View {
                             .padding(.top, 30)
                     }
                 }
-                .padding(.bottom, isPhone ? 70 : 8)
+                .padding(.bottom, 8)
             }
         }
     }
