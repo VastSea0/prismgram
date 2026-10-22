@@ -268,7 +268,7 @@ private struct ProfileHeader: View {
         HStack(spacing: 6) {
             if isOwn {
                 Button("Profili düzenle") {
-                    NSWorkspace.shared.open(URL(string: "https://www.instagram.com/accounts/edit/")!)
+                    store.openWeb(URL(string: "https://www.instagram.com/accounts/edit/")!, title: "Profili düzenle")
                 }
                 .buttonStyle(IGButtonStyle())
 
@@ -283,29 +283,44 @@ private struct ProfileHeader: View {
                     .buttonStyle(IGButtonStyle())
             }
 
-            Menu {
+            if isOwn {
                 Button {
-                    NSWorkspace.shared.open(profileURL)
+                    store.isShowingInstagramSettings = true
                 } label: {
-                    Label("Tarayıcıda Aç", systemImage: "safari")
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.igSecondaryFill))
+                        .contentShape(.rect)
                 }
-                Button {
-                    copyProfileLink()
+                .buttonStyle(.plain)
+                .help("Ayarlar ve hareketler")
+            } else {
+                Menu {
+                    Button {
+                        NSWorkspace.shared.open(profileURL)
+                    } label: {
+                        Label("Tarayıcıda Aç", systemImage: "safari")
+                    }
+                    Button {
+                        copyProfileLink()
+                    } label: {
+                        Label("Profil Bağlantısını Kopyala", systemImage: "link")
+                    }
                 } label: {
-                    Label("Profil Bağlantısını Kopyala", systemImage: "link")
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.igSecondaryFill))
+                        .contentShape(.rect)
                 }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 34, height: 32)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.igSecondaryFill))
-                    .contentShape(.rect)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
         }
     }
 

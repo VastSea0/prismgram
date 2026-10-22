@@ -14,6 +14,7 @@ final class ImagePipeline {
     private let memory = NSCache<NSString, NSImage>()
     private var inflight: [String: Task<NSImage?, Never>] = [:]
     private let session: URLSession
+    private let diskCache: URLCache
 
     private init() {
         memory.totalCostLimit = 256 * 1024 * 1024
@@ -21,7 +22,8 @@ final class ImagePipeline {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Prismgram/Images", isDirectory: true)
         let configuration = URLSessionConfiguration.default
-        configuration.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 512 * 1024 * 1024, directory: directory)
+        diskCache = URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 512 * 1024 * 1024, directory: directory)
+        configuration.urlCache = diskCache
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.httpMaximumConnectionsPerHost = 8
         session = URLSession(configuration: configuration)
@@ -29,6 +31,13 @@ final class ImagePipeline {
 
     private static func key(_ url: URL, _ maxPixelSize: CGFloat) -> String {
         "\(Int(maxPixelSize))|\(url.absoluteString)"
+    }
+
+    var diskUsage: Int { diskCache.currentDiskUsage }
+
+    func clear() {
+        memory.removeAllObjects()
+        diskCache.removeAllCachedResponses()
     }
 
     func cached(_ url: URL?, maxPixelSize: CGFloat) -> NSImage? {

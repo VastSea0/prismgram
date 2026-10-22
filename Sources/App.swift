@@ -13,6 +13,12 @@ struct InstagramMacApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
 
+            CommandGroup(after: .appSettings) {
+                Button("Instagram Ayarları…") { store.isShowingInstagramSettings = true }
+                    .keyboardShortcut(",", modifiers: [.command, .shift])
+                    .disabled(store.session != .signedIn)
+            }
+
             CommandMenu("Görünüm Modu") {
                 Button("Telefon") { store.layoutMode = .phone }
                     .keyboardShortcut("1", modifiers: .control)
@@ -46,6 +52,10 @@ struct InstagramMacApp: App {
                 Button("Yenile") { Task { await store.refresh(store.tab) } }
                     .keyboardShortcut("r", modifiers: .command)
             }
+        }
+
+        Settings {
+            PrismgramSettingsView(store: store)
         }
     }
 }

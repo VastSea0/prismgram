@@ -202,9 +202,11 @@ struct MediaPager: View {
     var isVisible = true
     var onDoubleTap: () -> Void = {}
 
-    @AppStorage("feedVideosMuted") private var isMuted = true
+    @AppStorage(Preference.feedVideosMuted) private var isMuted = true
+    @AppStorage(Preference.feedAutoplay) private var autoplay = true
     @State private var pageID: String?
     @State private var isHovering = false
+    @State private var userStarted = false
     @State private var showHeartBurst = false
     @State private var heartScale: CGFloat = 0.3
     @State private var heartOpacity: Double = 0
@@ -222,7 +224,7 @@ struct MediaPager: View {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             Group {
                                 if let video = item.videoURL {
-                                    LoopingVideo(url: video, isPlaying: isVisible && index == currentIndex, isMuted: isMuted)
+                                    LoopingVideo(url: video, isPlaying: (autoplay || userStarted) && isVisible && index == currentIndex, isMuted: isMuted)
                                 } else {
                                     RemoteImage(url: item.imageURL)
                                 }
@@ -250,6 +252,18 @@ struct MediaPager: View {
                         .padding(.vertical, 3)
                         .background(.black.opacity(0.6), in: .capsule)
                         .padding(12)
+                }
+            }
+            .overlay {
+                if current?.videoURL != nil && !autoplay && !userStarted {
+                    Button { userStarted = true } label: {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(.white)
+                            .frame(width: 64, height: 64)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -837,7 +851,7 @@ struct MediaGridTile: View {
 struct ReelsView: View {
     @Bindable var store: AppStore
     @State private var activeID: String?
-    @AppStorage("reelsMuted") private var isMuted = false
+    @AppStorage(Preference.reelsMuted) private var isMuted = false
 
     var body: some View {
         ScrollView(.vertical) {

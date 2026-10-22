@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Observation
+import WebKit
 
 @MainActor
 @Observable
@@ -44,7 +45,7 @@ final class AppStore {
     private(set) var viewerUsername: String?
 
     // Navigation / presentation
-    var layoutMode: AppLayoutMode = .hybrid {
+    var layoutMode: AppLayoutMode = AppLayoutMode(rawValue: UserDefaults.standard.string(forKey: Preference.launchLayout) ?? "") ?? .hybrid {
         didSet {
             guard oldValue != layoutMode else { return }
             isInspectorShown = layoutMode == .desktop
@@ -233,7 +234,7 @@ final class AppStore {
     // MARK: Navigation
 
     func select(_ newTab: InstagramTab) {
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        haptic(.alignment)
         withAnimation(.snappy(duration: 0.25)) {
             if newTab == .profile && (tab != .profile || isViewingOtherProfile) {
                 showOwnProfile()
@@ -326,7 +327,7 @@ final class AppStore {
     }
 
     func refresh(_ tab: InstagramTab) async {
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        haptic(.alignment)
         switch tab {
         case .home: feedCursor = nil; await loadHome()
         case .explore: await loadExplore()
@@ -719,7 +720,7 @@ final class AppStore {
     /// Leaves an emoji reaction. Uses the direct_v2 API when the message's item id is known, otherwise the
     /// hidden page's own reaction control in the verified thread. Rolled back if neither works.
     func react(_ emoji: String, to message: IGDirectMessage, in thread: IGDirectThread) {
-        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+        haptic(.levelChange)
         updateMessage(message.id, in: thread.id) { $0.reactions = [emoji] + $0.reactions.filter { $0 != emoji } }
         let previous = message.reactions
         let chain = sendChain
@@ -801,6 +802,44 @@ final class AppStore {
         guard let t = directThreads.firstIndex(where: { $0.id == threadID }),
               let m = directThreads[t].messages.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.spring(duration: 0.3, bounce: 0.4)) { change(&directThreads[t].messages[m]) }
+    }
+
+    private func haptic(_ pattern: NSHapticFeedbackManager.FeedbackPattern) {
+        guard UserDefaults.standard.object(forKey: Preference.haptics) as? Bool ?? true else { return }
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .default)
+    }
+
+    // MARK: Account
+
+    /// Forgets the Instagram session on this Mac and returns to the sign-in screen.
+    func signOut() async {
+        _ = try? await client.request("/api/v1/web/accounts/logout/ajax/", method: "POST", body: "one_tap_app_login=0")
+        let store = WKWebsiteDataStore.default()
+        let records = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
+        await store.removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            for: records.filter { $0.displayName.lowercased().contains("instagram") || $0.displayName.lowercased().contains("facebook") }
+        )
+        resetData()
+        viewerID = nil
+        viewerUsername = nil
+        tab = .home
+        session = .signedOut
+    }
+
+    func setAccountPrivate(_ makePrivate: Bool) async -> Bool {
+        guard let response = try? await client.request(
+            "/api/v1/accounts/\(makePrivate ? "set_private" : "set_public")/", method: "POST", body: ""
+        ), (200..<300).contains(response.status) else { return false }
+        updateProfile(viewerID ?? "") { $0.isPrivate = makePrivate }
+        return true
+    }
+
+    func reloadEngine() async {
+        await client.prepare()
+        client.setNetworkTap(pattern: "/api/|/graphql")
+        resetData()
+        await ensureLoaded(tab)
     }
 
     // MARK: Notes
@@ -1018,7 +1057,7 @@ final class AppStore {
     func toggleFollow(_ user: IGUser) {
         let isOn = user.isFollowing == true || user.isRequested
         let target = !isOn
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        haptic(.alignment)
         updateProfile(user.id) {
             if target && $0.isPrivate {
                 $0.isRequested = true
@@ -1110,7 +1149,7 @@ final class AppStore {
 
     func toggleLike(_ post: IGPost) {
         let target = !(livePost(post.id)?.hasLiked ?? post.hasLiked)
-        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+        haptic(.levelChange)
         mutate(post.id) { $0.hasLiked = target; $0.likeCount += target ? 1 : -1 }
         Task {
             do {
@@ -1123,7 +1162,7 @@ final class AppStore {
 
     func toggleSave(_ post: IGPost) {
         let target = !(livePost(post.id)?.hasSaved ?? post.hasSaved)
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        haptic(.alignment)
         mutate(post.id) { $0.hasSaved = target }
         Task {
             do {
