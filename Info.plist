@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>tr</string>
+    <key>CFBundleExecutable</key>
+    <string>InstagramMac</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.native.instagrammac</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Instagram</string>
+    <key>CFBundleDisplayName</key>
+    <string>Instagram</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Instagram fotoğraf, Reels ve Hikaye çekmek için kameranızı kullanır.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Instagram Hikaye, Reels ve aramalarda ses kaydı için mikrofonunuzu kullanır.</string>
+</dict>
+</plist>
