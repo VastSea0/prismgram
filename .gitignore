@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+Instagram.app/
+.DS_Store
+*.png
+*.ips
