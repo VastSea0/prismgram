@@ -28,6 +28,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         case badEnvelope
     }
 
+    /// How long a request waits for the page to (re)load before giving up.
+    private static let readinessTimeout: Duration = .seconds(20)
+
     static let appID = "936619743392459"
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
     private static let engineSize = NSSize(width: 1100, height: 900)
@@ -49,6 +52,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         configuration.websiteDataStore = .default()
         configuration.userContentController = controller
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        // The host window is always occluded; without this WebKit throttles timers and eventually
+        // suspends the page, which is why tapped queries sometimes arrived late or never.
+        configuration.preferences.inactiveSchedulingPolicy = .none
 
         let frame = NSRect(origin: .zero, size: Self.engineSize)
         let view = WKWebView(frame: frame, configuration: configuration)
@@ -93,17 +99,64 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         if let url = URL(string: "https://www.instagram.com/") {
             webView.load(URLRequest(url: url))
         }
+        _ = await waitUntilReady(timeout: Self.readinessTimeout)
+        try? await Task.sleep(for: .seconds(1.5))
+    }
+
+    /// Suspends until the page has finished loading, or the timeout passes. Returns whether the page is ready.
+    private func waitUntilReady(timeout: Duration) async -> Bool {
+        if isReady { return true }
+        let timeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.resumeWaiters()
+        }
         await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }
-        try? await Task.sleep(for: .seconds(1.5))
+        timeoutTask.cancel()
+        return isReady
+    }
+
+    private func resumeWaiters() {
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isReady = false
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isReady = true
-        let pending = waiters
-        waiters.removeAll()
-        pending.forEach { $0.resume() }
+        resumeWaiters()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        // A failed sub-navigation leaves the previous document usable.
+        isReady = webView.url != nil
+        resumeWaiters()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        isReady = webView.url != nil && !webView.isLoading
+        resumeWaiters()
+        if !isReady { scheduleReload() }
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        isReady = false
+        scheduleReload()
+    }
+
+    private func scheduleReload() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !self.isReady, !self.webView.isLoading,
+                  let url = URL(string: "https://www.instagram.com/") else { return }
+            self.webView.load(URLRequest(url: url))
+        }
     }
 
     /// Attempts to read the signed-in viewer's username from the page's navigation bar or embedded scripts.
@@ -130,7 +183,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     // MARK: Requests made as the page
 
     func request(_ path: String, method: String = "GET", body: String? = nil) async throws -> Response {
-        guard isReady else { throw ClientError.notReady }
+        guard await waitUntilReady(timeout: Self.readinessTimeout) else { throw ClientError.notReady }
 
         let script = """
         const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
@@ -152,17 +205,21 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         return JSON.stringify({ status: response.status, body: await response.text() });
         """
 
-        let raw = try await webView.callAsyncJavaScript(
-            script,
-            arguments: [
-                "path": path,
-                "method": method,
-                "body": body ?? NSNull(),
-                "appID": Self.appID
-            ],
-            in: nil,
-            contentWorld: .page
-        )
+        let arguments: [String: Any] = [
+            "path": path,
+            "method": method,
+            "body": body ?? NSNull(),
+            "appID": Self.appID
+        ]
+        let raw: Any?
+        do {
+            raw = try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+        } catch {
+            // The page may have been replacing its document mid-call; give it one more chance.
+            try? await Task.sleep(for: .milliseconds(600))
+            guard await waitUntilReady(timeout: Self.readinessTimeout) else { throw ClientError.notReady }
+            raw = try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+        }
 
         guard let text = raw as? String,
               let envelopeData = text.data(using: .utf8),
