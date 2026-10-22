@@ -45,7 +45,11 @@ final class AppStore {
     private(set) var viewerUsername: String?
 
     // Navigation / presentation
-    var layoutMode: AppLayoutMode = AppLayoutMode(rawValue: UserDefaults.standard.string(forKey: Preference.launchLayout) ?? "") ?? .hybrid {
+    /// `PRISMGRAM_LAYOUT=phone|hybrid|desktop` overrides the saved launch layout for one run (handy for testing).
+    var layoutMode: AppLayoutMode = AppLayoutMode(
+        rawValue: ProcessInfo.processInfo.environment["PRISMGRAM_LAYOUT"]
+            ?? UserDefaults.standard.string(forKey: Preference.launchLayout) ?? ""
+    ) ?? .hybrid {
         didSet {
             guard oldValue != layoutMode else { return }
             isInspectorShown = layoutMode == .desktop

@@ -73,8 +73,9 @@ struct ContentView: View {
             detail
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     PhoneTabBar(store: store, unreadCount: unreadCount)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 10)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 12)
+                        .padding(.top, 6)
                 }
         } else {
             NavigationSplitView {
@@ -204,83 +205,76 @@ struct ContentView: View {
     }
 }
 
-/// The phone layout's tab bar: AppKit's own segmented control, so selection slides and reacts with the
-/// same Liquid Glass behaviour as the system's segmented controls (like the toolbar's layout picker).
+/// The phone layout's tab bar, after the iOS 26 tab bar Instagram uses: a floating Liquid Glass capsule
+/// with a selection pill that slides between tabs, icons that spring when pressed, and the viewer's
+/// photo for Profile.
 struct PhoneTabBar: View {
     @Bindable var store: AppStore
     var unreadCount: Int = 0
+    @Namespace private var selection
 
     var body: some View {
-        let tabs = InstagramTab.allCases
-        TabSegments(tabs: tabs, selection: store.tab) { store.select($0) }
-            .frame(height: 40)
-            .overlay {
-                if unreadCount > 0, let index = tabs.firstIndex(of: .direct) {
-                    GeometryReader { geo in
-                        let segment = geo.size.width / CGFloat(tabs.count)
-                        Circle()
-                            .fill(Color.igLike)
-                            .frame(width: 7, height: 7)
-                            .position(x: segment * (CGFloat(index) + 0.5) + 11, y: geo.size.height / 2 - 9)
+        GlassEffectContainer {
+            HStack(spacing: 0) {
+                ForEach(InstagramTab.allCases) { tab in
+                    let isSelected = store.tab == tab
+                    Button {
+                        store.select(tab)
+                    } label: {
+                        icon(for: tab, selected: isSelected)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 46)
+                            .background {
+                                if isSelected {
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.1))
+                                        .matchedGeometryEffect(id: "selection", in: selection)
+                                }
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if tab == .direct && unreadCount > 0 {
+                                    Text(unreadCount > 9 ? "9+" : "\(unreadCount)")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .frame(minWidth: 16, minHeight: 16)
+                                        .background(Capsule().fill(Color.igLike))
+                                        .offset(x: -10, y: 5)
+                                }
+                            }
+                            .contentShape(.capsule)
                     }
-                    .allowsHitTesting(false)
+                    .buttonStyle(TabPressStyle())
+                    .help(tab.title)
+                    .accessibilityLabel(tab.title)
                 }
             }
+            .padding(4)
+            .glassEffect(.regular.interactive(), in: .capsule)
+        }
+        .animation(.spring(response: 0.36, dampingFraction: 0.74), value: store.tab)
+    }
+
+    @ViewBuilder
+    private func icon(for tab: InstagramTab, selected: Bool) -> some View {
+        if tab == .profile {
+            AvatarView(url: store.viewer?.avatarURL, size: 25)
+                .padding(2)
+                .overlay(Circle().strokeBorder(Color.primary, lineWidth: selected ? 1.5 : 0))
+        } else {
+            Image(systemName: selected ? tab.filledSymbolName : tab.symbolName)
+                .font(.system(size: 21, weight: selected ? .semibold : .regular))
+                .foregroundStyle(.primary)
+                .symbolEffect(.bounce, value: selected)
+        }
     }
 }
 
-private struct TabSegments: NSViewRepresentable {
-    let tabs: [InstagramTab]
-    let selection: InstagramTab
-    let onSelect: (InstagramTab) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onSelect: onSelect, tabs: tabs) }
-
-    func makeNSView(context: Context) -> NSSegmentedControl {
-        let control = NSSegmentedControl(
-            images: tabs.map { image(for: $0, selected: false) },
-            trackingMode: .selectOne,
-            target: context.coordinator,
-            action: #selector(Coordinator.changed(_:))
-        )
-        control.segmentDistribution = .fillEqually
-        control.controlSize = .extraLarge
-        for (index, tab) in tabs.enumerated() {
-            control.setToolTip(tab.title, forSegment: index)
-            control.setLabel("", forSegment: index)
-        }
-        return control
-    }
-
-    func updateNSView(_ control: NSSegmentedControl, context: Context) {
-        context.coordinator.onSelect = onSelect
-        for (index, tab) in tabs.enumerated() {
-            control.setImage(image(for: tab, selected: tab == selection), forSegment: index)
-        }
-        if let index = tabs.firstIndex(of: selection), control.selectedSegment != index {
-            control.selectedSegment = index
-        }
-    }
-
-    private func image(for tab: InstagramTab, selected: Bool) -> NSImage {
-        let configuration = NSImage.SymbolConfiguration(pointSize: 17, weight: selected ? .semibold : .regular)
-        let image = NSImage(systemSymbolName: selected ? tab.filledSymbolName : tab.symbolName, accessibilityDescription: tab.title)?
-            .withSymbolConfiguration(configuration)
-        return image ?? NSImage()
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var onSelect: (InstagramTab) -> Void
-        let tabs: [InstagramTab]
-
-        init(onSelect: @escaping (InstagramTab) -> Void, tabs: [InstagramTab]) {
-            self.onSelect = onSelect
-            self.tabs = tabs
-        }
-
-        @objc func changed(_ sender: NSSegmentedControl) {
-            if let tab = tabs[safe: sender.selectedSegment] { onSelect(tab) }
-        }
+/// Tab icons shrink a little under the finger and spring back, as in iOS.
+private struct TabPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.86 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.55), value: configuration.isPressed)
     }
 }

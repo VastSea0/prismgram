@@ -68,7 +68,7 @@ enum InstagramTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .home: return "house"
         case .explore: return "magnifyingglass"
-        case .reels: return "play.rectangle"
+        case .reels: return "play.square"
         case .activity: return "heart"
         case .direct: return "paperplane"
         case .profile: return "person.crop.circle"
@@ -79,7 +79,7 @@ enum InstagramTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .home: return "house.fill"
         case .explore: return "magnifyingglass"
-        case .reels: return "play.rectangle.fill"
+        case .reels: return "play.square.fill"
         case .activity: return "heart.fill"
         case .direct: return "paperplane.fill"
         case .profile: return "person.crop.circle.fill"
