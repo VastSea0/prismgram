@@ -76,6 +76,7 @@ final class AppStore {
     private(set) var directPhase: Phase = .idle
     var selectedThreadID: String?
     private(set) var isSendingDirectMessage = false
+    private var sendChain: Task<Void, Never>?
 
     private(set) var profile: IGUser?
     private(set) var profileGrids: [ProfileSection: PostPage] = [:]
@@ -197,7 +198,10 @@ final class AppStore {
         if let idx = directThreads.firstIndex(where: { $0.id == detailed.id || $0.threadFBID == detailed.threadFBID }) {
             var updated = directThreads[idx]
             if !detailed.messages.isEmpty {
-                updated.messages = detailed.messages
+                // Keep messages still being sent, or that failed, until the server's copy replaces them.
+                let local = updated.messages.filter { $0.delivery != .sent && $0.id.hasPrefix("local-") }
+                let confirmed = Set(detailed.messages.filter(\.isFromViewer).map(\.text))
+                updated.messages = detailed.messages + local.filter { $0.delivery == .failed || !confirmed.contains($0.text) }
             }
             if !detailed.snippet.isEmpty {
                 updated.snippet = detailed.snippet
@@ -576,35 +580,60 @@ final class AppStore {
         }
     }
 
-    func sendDirectMessage(text: String, in thread: IGDirectThread) async -> Bool {
+    /// Shows the message in the transcript at once (Apple's "Sending…" state) and sends queued messages one after another.
+    func sendDirectMessage(text: String, in thread: IGDirectThread) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isSendingDirectMessage else { return false }
-        isSendingDirectMessage = true
-        defer { isSendingDirectMessage = false }
-
-        await client.openDirectThread(
-            threadID: thread.id,
-            title: thread.title,
-            username: thread.users.first?.username
+        guard !trimmed.isEmpty, let index = directThreads.firstIndex(where: { $0.id == thread.id }) else { return }
+        let message = IGDirectMessage(
+            id: "local-\(UUID().uuidString)",
+            senderFBID: thread.viewerFBID,
+            senderUsername: viewerUsername,
+            senderAvatarURL: nil,
+            text: trimmed,
+            timestamp: .now,
+            isFromViewer: true,
+            delivery: .sending
         )
-        try? await Task.sleep(for: .milliseconds(350))
-
-        let sent = await client.sendDirectMessage(text: trimmed)
-        if sent, let idx = directThreads.firstIndex(where: { $0.id == thread.id }) {
-            let optimistic = IGDirectMessage(
-                id: UUID().uuidString,
-                senderFBID: thread.viewerFBID,
-                senderUsername: viewerUsername,
-                senderAvatarURL: nil,
-                text: trimmed,
-                timestamp: .now,
-                isFromViewer: true
-            )
-            directThreads[idx].messages.append(optimistic)
-            directThreads[idx].snippet = trimmed
-            directThreads[idx].lastActivityAt = .now
+        withAnimation(.spring(duration: 0.35, bounce: 0.18)) {
+            directThreads[index].messages.append(message)
+            directThreads[index].snippet = trimmed
+            directThreads[index].lastActivityAt = .now
+            // Apple Messages moves the conversation to the top of the list as soon as you send.
+            let updated = directThreads.remove(at: index)
+            directThreads.insert(updated, at: directThreads.firstIndex(where: { !$0.isPinned }) ?? 0)
         }
-        return sent
+        enqueueSend(message, threadID: thread.id)
+    }
+
+    func retryDirectMessage(_ message: IGDirectMessage, in thread: IGDirectThread) {
+        setDelivery(.sending, for: message.id, in: thread.id)
+        enqueueSend(message, threadID: thread.id)
+    }
+
+    private func enqueueSend(_ message: IGDirectMessage, threadID: String) {
+        let previous = sendChain
+        sendChain = Task {
+            await previous?.value
+            guard let thread = directThreads.first(where: { $0.id == threadID }) else { return }
+            isSendingDirectMessage = true
+            defer { isSendingDirectMessage = false }
+            await client.openDirectThread(threadID: thread.id, title: thread.title, username: thread.users.first?.username)
+            try? await Task.sleep(for: .milliseconds(350))
+            let sent = await client.sendDirectMessage(text: message.text)
+            setDelivery(sent ? .sent : .failed, for: message.id, in: threadID)
+        }
+    }
+
+    private func setDelivery(_ delivery: IGDirectMessage.Delivery, for messageID: String, in threadID: String) {
+        guard let threadIndex = directThreads.firstIndex(where: { $0.id == threadID }),
+              let messageIndex = directThreads[threadIndex].messages.firstIndex(where: { $0.id == messageID }) else { return }
+        directThreads[threadIndex].messages[messageIndex].delivery = delivery
+    }
+
+    func markThreadRead(_ thread: IGDirectThread, _ isRead: Bool = true) {
+        if let index = directThreads.firstIndex(where: { $0.id == thread.id }) {
+            directThreads[index].isUnread = !isRead
+        }
     }
 
     // MARK: Profile

@@ -240,13 +240,20 @@ struct IGNote: Identifiable, Hashable, Sendable {
 }
 
 struct IGDirectMessage: Identifiable, Hashable, Sendable {
+    enum Delivery: Hashable, Sendable { case sent, sending, failed }
+
     let id: String
     let senderFBID: String
     let senderUsername: String?
     let senderAvatarURL: URL?
-    let text: String
+    var text: String
     let timestamp: Date
     let isFromViewer: Bool
+    /// A photo, video or shared post's preview attached to the message.
+    var media: IGMediaItem? = nil
+    /// Emoji reactions left on the message.
+    var reactions: [String] = []
+    var delivery: Delivery = .sent
 }
 
 struct IGDirectThread: Identifiable, Hashable, Sendable {
@@ -611,12 +618,17 @@ enum IGJSON {
                     ?? ""
                 let snippetText = (node["igd_snippet"] as? String) ?? ""
                 let contentType = (node["content_type"] as? String) ?? ""
-                let display = !textBody.isEmpty ? textBody : (!snippetText.isEmpty ? snippetText : Self.describeContentType(contentType))
-
-                if latestSnippet.isEmpty && !display.isEmpty {
-                    latestSnippet = display
+                let media = attachment(in: node)
+                let fallback = !snippetText.isEmpty ? snippetText : Self.describeContentType(contentType)
+                let display = !textBody.isEmpty ? textBody : (media == nil ? fallback : "")
+                let reactions = ((node["reactions"] as? [[String: Any]]) ?? []).compactMap {
+                    ($0["reaction"] as? String) ?? ($0["emoji"] as? String)
                 }
-                guard !display.isEmpty else { continue }
+
+                if latestSnippet.isEmpty {
+                    latestSnippet = !display.isEmpty ? display : fallback
+                }
+                guard !display.isEmpty || media != nil else { continue }
 
                 let tsMs = double(node["timestamp_ms"]) ?? lastMs
                 let date = tsMs > 0 ? Date(timeIntervalSince1970: tsMs / 1000.0) : lastDate
@@ -630,7 +642,9 @@ enum IGJSON {
                         senderAvatarURL: senderAvatar,
                         text: display,
                         timestamp: date,
-                        isFromViewer: fromViewer
+                        isFromViewer: fromViewer,
+                        media: media,
+                        reactions: reactions
                     )
                 )
             }
@@ -651,6 +665,59 @@ enum IGJSON {
             viewerFBID: viewerFBID,
             messages: messages
         )
+    }
+
+    /// Finds a photo, video or shared-post preview anywhere in a message node, without descending into the sender.
+    private static func attachment(in node: [String: Any]) -> IGMediaItem? {
+        var found: IGMediaItem?
+        func walk(_ value: Any, depth: Int) {
+            guard found == nil, depth < 9 else { return }
+            if let dict = value as? [String: Any] {
+                if dict["image_versions2"] != nil || dict["video_versions"] != nil, let item = mediaItem(dict) {
+                    found = item
+                    return
+                }
+                for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
+                    walk(child, depth: depth + 1)
+                }
+            } else if let array = value as? [Any] {
+                array.forEach { walk($0, depth: depth + 1) }
+            }
+        }
+        walk(node, depth: 0)
+        if let found { return found }
+
+        // Shares and attachments that are not media objects still carry a preview image URL.
+        var preview: (URL, Double)?
+        func scan(_ value: Any, depth: Int) {
+            guard preview == nil, depth < 9 else { return }
+            if let dict = value as? [String: Any] {
+                for key in ["preview_url", "image_url", "preview_image_url", "uri", "url"] {
+                    if let text = dict[key] as? String, let link = URL(string: text), isMediaCDN(link) {
+                        let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
+                        let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
+                        preview = (link, width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1)
+                        return
+                    }
+                }
+                for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
+                    scan(child, depth: depth + 1)
+                }
+            } else if let array = value as? [Any] {
+                array.forEach { scan($0, depth: depth + 1) }
+            }
+        }
+        scan(node, depth: 0)
+        return preview.map { IGMediaItem(id: $0.0.absoluteString, thumbURL: $0.0, imageURL: $0.0, videoURL: nil, aspectRatio: $0.1) }
+    }
+
+    private static let skippedAttachmentKeys: Set<String> = ["sender", "replied_to_message", "user_dict", "profile_pic_url", "reactions"]
+
+    private static func isMediaCDN(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let path = url.path.lowercased()
+        return (host.contains("cdninstagram.com") || host.contains("fbcdn.net"))
+            && !path.hasSuffix(".mp4") && !path.contains("/t51.2885-19/")
     }
 
     private static func describeContentType(_ type: String) -> String {
