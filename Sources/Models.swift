@@ -237,6 +237,10 @@ struct IGNote: Identifiable, Hashable, Sendable {
     let musicTitle: String?
     let musicArtist: String?
     let createdAt: Date
+    var musicPreviewURL: URL? = nil
+    var musicCoverURL: URL? = nil
+    /// The note's own id (for deleting the viewer's note), as opposed to the tray item id.
+    var noteID: String? = nil
 }
 
 struct IGDirectMessage: Identifiable, Hashable, Sendable {
@@ -587,7 +591,10 @@ enum IGJSON {
                 text: text,
                 musicTitle: musicTitle,
                 musicArtist: musicArtist,
-                createdAt: created
+                createdAt: created,
+                musicPreviewURL: url(musicAsset?["progressive_download_url"]) ?? url(musicAsset?["fast_start_progressive_download_url"]),
+                musicCoverURL: url(musicAsset?["cover_artwork_thumbnail_uri"]) ?? url(musicAsset?["cover_artwork_uri"]),
+                noteID: string(noteDict["id"])
             )
         }
     }

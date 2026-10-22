@@ -50,6 +50,12 @@ struct MessagesView: View {
                 Task { await store.refresh(.direct) }
             }
         }
+        .sheet(item: $store.openNote) { note in
+            NoteSheet(note: note, store: store)
+        }
+        .sheet(isPresented: $store.isComposingNote) {
+            NoteComposerSheet(store: store)
+        }
         .onAppear(perform: consumePendingSearch)
         .onChange(of: store.pendingDirectSearch) { _, _ in consumePendingSearch() }
     }
@@ -289,9 +295,34 @@ struct NotesBar: View {
     var body: some View {
         ScrollView(.horizontal) {
             LazyHStack(alignment: .bottom, spacing: 14) {
+                if store.ownNote == nil {
+                    Button {
+                        store.isComposingNote = true
+                    } label: {
+                        VStack(spacing: 4) {
+                            AvatarView(url: store.viewer?.avatarURL, size: 62)
+                                .overlay(alignment: .top) {
+                                    Text("Not bırak…")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 6)
+                                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(light: 0xFFFFFF, dark: 0x262626)).shadow(color: .black.opacity(0.14), radius: 4, y: 1))
+                                        .fixedSize()
+                                        .offset(y: -30)
+                                }
+                                .padding(.top, 40)
+                            Text("Notun")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 74)
+                        }
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
                 ForEach(store.notes) { note in
                     Button {
-                        store.openProfile(of: note.user)
+                        store.openNote = note
                     } label: {
                         VStack(spacing: 4) {
                             AvatarView(url: note.user.avatarURL, size: 62)

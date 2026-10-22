@@ -81,6 +81,8 @@ final class AppStore {
     private(set) var activityPhase: Phase = .idle
 
     private(set) var notes: [IGNote] = []
+    var openNote: IGNote?
+    var isComposingNote = false
     private(set) var directThreads: [IGDirectThread] = []
     private(set) var directPhase: Phase = .idle
     var selectedThreadID: String?
@@ -799,6 +801,63 @@ final class AppStore {
         guard let t = directThreads.firstIndex(where: { $0.id == threadID }),
               let m = directThreads[t].messages.firstIndex(where: { $0.id == id }) else { return }
         withAnimation(.spring(duration: 0.3, bounce: 0.4)) { change(&directThreads[t].messages[m]) }
+    }
+
+    // MARK: Notes
+
+    /// The viewer as far as any loaded response knows them (for their own avatar in notes and comments).
+    var viewer: IGUser? {
+        if let profile, profile.id == viewerID { return profile }
+        return stories.first(where: { $0.user.id == viewerID })?.user
+            ?? notes.first(where: { $0.user.id == viewerID })?.user
+            ?? feed.first(where: { $0.user.id == viewerID })?.user
+    }
+
+    var ownNote: IGNote? { notes.first(where: { $0.user.id == viewerID }) }
+
+    /// Answers a note the way Instagram does: as a direct message to its author.
+    func replyToNote(_ note: IGNote, text: String) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if let thread = directThreads.first(where: { !$0.isGroup && $0.users.first?.id == note.user.id }) {
+            return await deliver(text: trimmed, to: thread)
+        }
+        return await broadcast(kind: "text", fields: ["recipient_users": "[[\(note.user.id)]]", "text": trimmed]) != nil
+    }
+
+    /// Shares a note (60 characters) with mutual followers (`audience` 0) or close friends (1).
+    func createNote(text: String, closeFriends: Bool) async -> Bool {
+        let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+        guard !trimmed.isEmpty,
+              let response = try? await client.request(
+                  "/api/v1/notes/create_note/",
+                  method: "POST",
+                  body: "note_style=0&text=\(encode(trimmed))&audience=\(closeFriends ? 1 : 0)"
+              ),
+              (200..<300).contains(response.status),
+              (response.json?["status"] as? String) == "ok" else { return false }
+        let noteDict = response.json?["note"] as? [String: Any]
+        if let me = viewer {
+            let note = IGNote(
+                id: "own-\(UUID().uuidString)",
+                user: me,
+                text: trimmed,
+                musicTitle: nil,
+                musicArtist: nil,
+                createdAt: .now,
+                noteID: IGJSON.string(noteDict?["id"])
+            )
+            withAnimation(.snappy) { notes = [note] + notes.filter { $0.user.id != viewerID } }
+        }
+        return true
+    }
+
+    func deleteOwnNote() async -> Bool {
+        guard let note = ownNote, let noteID = note.noteID,
+              let response = try? await client.request("/api/v1/notes/delete_note/", method: "POST", body: "id=\(encode(noteID))"),
+              (200..<300).contains(response.status) else { return false }
+        withAnimation(.snappy) { notes.removeAll { $0.id == note.id } }
+        return true
     }
 
     /// Opens Instagram pages inside the app with the signed-in session; other sites go to the browser.
