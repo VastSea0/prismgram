@@ -212,6 +212,14 @@ struct IGStoryTray: Identifiable, Hashable, Sendable {
     var slides: [IGMediaItem]
     var title: String? = nil
     var coverURL: URL? = nil
+    /// When the viewer last watched this tray (seconds since 1970), used to resume at the first new slide.
+    var seenAt: Double = 0
+
+    /// Index of the first slide posted after the viewer last watched, or 0 when everything is new or seen.
+    var resumeIndex: Int {
+        guard hasUnseen, seenAt > 0 else { return 0 }
+        return slides.firstIndex(where: { ($0.takenAt?.timeIntervalSince1970 ?? 0) > seenAt }) ?? 0
+    }
 }
 
 struct IGActivity: Identifiable, Hashable, Sendable {
@@ -447,7 +455,8 @@ enum IGJSON {
             hasUnseen: seen < latest,
             slides: slides,
             title: title,
-            coverURL: url(cover)
+            coverURL: url(cover),
+            seenAt: seen
         )
     }
 

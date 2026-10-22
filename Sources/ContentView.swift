@@ -19,11 +19,16 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .toolbar { toolbarContent }
-        .background(WindowSizer(mode: store.layoutMode))
-        .sheet(item: $store.storyViewer) { tray in
-            StoryViewer(tray: tray, store: store)
+        .overlay {
+            if store.storyViewer != nil {
+                StoryViewer(store: store)
+                    .ignoresSafeArea()
+                    .transition(.scale(scale: 0.86).combined(with: .opacity))
+            }
         }
+        .toolbar { toolbarContent }
+        .toolbar(store.storyViewer == nil ? .visible : .hidden, for: .windowToolbar)
+        .background(WindowSizer(mode: store.layoutMode))
         .sheet(item: $store.detailPost) { post in
             PostDetailView(postID: post.id, fallback: post, store: store)
         }

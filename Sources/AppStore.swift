@@ -51,7 +51,7 @@ final class AppStore {
     var storyViewer: IGStoryTray?
     /// The trays the open story viewer moves through (the home tray or a profile's highlights).
     private(set) var storyQueue: [IGStoryTray] = []
-    var isLoadingStorySlides = false
+    private var loadingStoryIDs: Set<String> = []
     var detailPost: IGPost?
     var isShowingLogin = false
 
@@ -168,10 +168,10 @@ final class AppStore {
 
         default:
             if event.url.contains("reels_media") {
-                if let current = storyViewer {
-                    let slides = IGJSON.storySlides(from: json, reelID: current.id)
+                for trayID in loadingStoryIDs {
+                    let slides = IGJSON.storySlides(from: json, reelID: trayID)
                     if !slides.isEmpty {
-                        applyStorySlides(slides, for: current.id)
+                        applyStorySlides(slides, for: trayID)
                     }
                 }
             }
@@ -240,7 +240,7 @@ final class AppStore {
 
     func openProfile(of user: IGUser) {
         detailPost = nil
-        storyViewer = nil
+        if storyViewer != nil { closeStory() }
         if user.id == viewerID {
             if tab != .profile { profileReturnTab = tab }
             showOwnProfile()
@@ -405,16 +405,63 @@ final class AppStore {
 
     func openStory(_ tray: IGStoryTray, in queue: [IGStoryTray]? = nil) {
         storyQueue = queue ?? [tray]
-        markStorySeen(tray.id)
-        storyViewer = tray
-        if tray.slides.isEmpty {
+        withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
+            storyViewer = latest(tray)
+        }
+        prepareStory(tray)
+    }
+
+    func closeStory() {
+        if let current = storyViewer { markStorySeen(current.id) }
+        withAnimation(.spring(duration: 0.32, bounce: 0)) {
+            storyViewer = nil
+        }
+        storyQueue = []
+    }
+
+    /// The tray before (`-1`) or after (`+1`) the open one in the queue, if any.
+    func adjacentStory(_ delta: Int) -> IGStoryTray? {
+        guard let current = storyViewer,
+              let index = storyQueue.firstIndex(where: { $0.id == current.id }) else { return nil }
+        return storyQueue[safe: index + delta].map(latest)
+    }
+
+    /// Moves the viewer to the neighbouring tray; closes it when there is none.
+    func showAdjacentStory(_ delta: Int) {
+        guard let next = adjacentStory(delta) else {
+            if delta > 0 { closeStory() }
+            return
+        }
+        if let current = storyViewer { markStorySeen(current.id) }
+        storyViewer = next
+        prepareStory(next)
+    }
+
+    private func prepareStory(_ tray: IGStoryTray) {
+        if latest(tray).slides.isEmpty {
             Task { await loadStorySlides(for: tray) }
+        }
+        // Load the next person's story while this one plays, so moving on does not show a spinner.
+        if let index = storyQueue.firstIndex(where: { $0.id == tray.id }),
+           let following = storyQueue[safe: index + 1], latest(following).slides.isEmpty {
+            Task { await loadStorySlides(for: following) }
         }
     }
 
+    /// The freshest copy of a tray: the tray lists are where slides land after loading.
+    private func latest(_ tray: IGStoryTray) -> IGStoryTray {
+        if let current = storyViewer, current.id == tray.id, !current.slides.isEmpty { return current }
+        return stories.first(where: { $0.id == tray.id && !$0.slides.isEmpty })
+            ?? profileHighlights.first(where: { $0.id == tray.id && !$0.slides.isEmpty })
+            ?? storyQueue.first(where: { $0.id == tray.id && !$0.slides.isEmpty })
+            ?? tray
+    }
+
+    func isLoadingStory(_ id: String) -> Bool { loadingStoryIDs.contains(id) }
+
     func loadStorySlides(for tray: IGStoryTray) async {
-        isLoadingStorySlides = true
-        defer { isLoadingStorySlides = false }
+        guard loadingStoryIDs.insert(tray.id).inserted else { return }
+        defer { loadingStoryIDs.remove(tray.id) }
 
         do {
             let json = try await fetch(
@@ -428,15 +475,14 @@ final class AppStore {
                 return
             }
         } catch {
-            // Fallback to driving the hidden WebView to the story route so its own fetch triggers
+            // Fall back to driving the hidden page to the story route so its own fetch is tapped.
         }
 
+        guard !tray.id.hasPrefix("highlight:") else { return }
         _ = await client.navigate(to: "/stories/\(tray.user.username)/")
         for _ in 0..<12 {
             try? await Task.sleep(for: .milliseconds(350))
-            if let current = storyViewer, current.id == tray.id, !current.slides.isEmpty {
-                break
-            }
+            if !latest(tray).slides.isEmpty { break }
         }
     }
 
@@ -446,6 +492,9 @@ final class AppStore {
         }
         if let index = profileHighlights.firstIndex(where: { $0.id == trayID }) {
             profileHighlights[index].slides = slides
+        }
+        if let index = storyQueue.firstIndex(where: { $0.id == trayID }) {
+            storyQueue[index].slides = slides
         }
         if var current = storyViewer, current.id == trayID {
             current.slides = slides
@@ -828,6 +877,9 @@ final class AppStore {
     }
 
     func markStorySeen(_ id: String) {
-        if let index = stories.firstIndex(where: { $0.id == id }) { stories[index].hasUnseen = false }
+        if let index = stories.firstIndex(where: { $0.id == id }), stories[index].hasUnseen {
+            stories[index].hasUnseen = false
+            stories[index].seenAt = Date.now.timeIntervalSince1970
+        }
     }
 }

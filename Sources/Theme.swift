@@ -87,3 +87,17 @@ extension Int {
         self < 10_000 ? formatted() : formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
     }
 }
+
+extension Date {
+    /// "şimdi", "5 dk", "3 sa", "2 g", "4 hf" — Instagram's short ages.
+    var igAge: String {
+        let seconds = max(0, Date.now.timeIntervalSince(self))
+        switch seconds {
+        case ..<60: return "şimdi"
+        case ..<3_600: return "\(Int(seconds / 60)) dk"
+        case ..<86_400: return "\(Int(seconds / 3_600)) sa"
+        case ..<604_800: return "\(Int(seconds / 86_400)) g"
+        default: return "\(Int(seconds / 604_800)) hf"
+        }
+    }
+}

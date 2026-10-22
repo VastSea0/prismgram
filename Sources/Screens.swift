@@ -49,21 +49,21 @@ struct AvatarView: View {
                 EmptyView()
             case .seen:
                 Circle()
-                    .strokeBorder(.tertiary.opacity(0.65), lineWidth: 1.2)
+                    .strokeBorder(Color(light: 0xDBDBDB, dark: 0x3A3A3A), lineWidth: 1)
                     .frame(width: size + gap + stroke, height: size + gap + stroke)
             case .unseen:
                 Circle()
                     .strokeBorder(
-                        AngularGradient(
+                        LinearGradient(
                             colors: [
-                                Color(red: 0.99, green: 0.78, blue: 0.22),
-                                Color(red: 0.99, green: 0.38, blue: 0.24),
-                                Color(red: 0.92, green: 0.16, blue: 0.48),
-                                Color(red: 0.64, green: 0.20, blue: 0.86),
-                                Color(red: 0.92, green: 0.16, blue: 0.48),
-                                Color(red: 0.99, green: 0.78, blue: 0.22)
+                                Color(hex: 0xFEDA75),
+                                Color(hex: 0xFA7E1E),
+                                Color(hex: 0xD62976),
+                                Color(hex: 0x962FBF),
+                                Color(hex: 0x4F5BD5)
                             ],
-                            center: .center
+                            startPoint: .bottomLeading,
+                            endPoint: .topTrailing
                         ),
                         lineWidth: stroke
                     )
@@ -506,11 +506,11 @@ struct StoryTray: View {
 
     var body: some View {
         ScrollView(.horizontal) {
-            LazyHStack(spacing: 14) {
+            LazyHStack(spacing: 10) {
                 ForEach(store.stories) { tray in
                     let isOwn = tray.user.id == store.viewerID
                     StoryTrayCell(tray: tray, isOwn: isOwn) {
-                        store.openStory(tray)
+                        store.openStory(tray, in: store.stories)
                     }
                 }
             }
@@ -525,43 +525,31 @@ private struct StoryTrayCell: View {
     let tray: IGStoryTray
     let isOwn: Bool
     let action: () -> Void
-    @State private var isPressed = false
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
-                ZStack(alignment: .bottomTrailing) {
-                    AvatarView(url: tray.user.avatarURL, size: 62, ring: tray.hasUnseen ? .unseen : .seen)
-                    if isOwn {
-                        Circle()
-                            .fill(Color.accentColor)
-                            .frame(width: 20, height: 20)
-                            .overlay {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
-                            .overlay {
-                                Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2)
-                            }
-                            .offset(x: -2, y: -2)
+            VStack(spacing: 5) {
+                AvatarView(url: tray.user.avatarURL, size: 62, ring: tray.hasUnseen ? .unseen : .seen)
+                    .frame(width: 72, height: 72)
+                    .overlay(alignment: .bottomTrailing) {
+                        if isOwn {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Circle().fill(Color.igBlue))
+                                .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 2.5))
+                                .offset(x: -2, y: -2)
+                        }
                     }
-                }
                 Text(isOwn ? "Hikayen" : tray.user.username)
-                    .font(.system(size: 11.5, weight: tray.hasUnseen ? .medium : .regular))
-                    .foregroundStyle(tray.hasUnseen ? .primary : .secondary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(tray.hasUnseen || isOwn ? .primary : .secondary)
                     .lineLimit(1)
-                    .frame(width: 72)
+                    .frame(width: 74)
             }
-            .scaleEffect(isPressed ? 0.93 : 1.0)
-            .animation(.spring(duration: 0.22, bounce: 0.35), value: isPressed)
         }
-        .buttonStyle(.plain)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded { _ in isPressed = false }
-        )
+        .buttonStyle(PressableButtonStyle())
     }
 }
 

@@ -1,0 +1,494 @@
+import SwiftUI
+import AVKit
+
+// MARK: - Story viewer (Instagram for iOS)
+//
+// Full-window, black, one 9:16 canvas per person. Tap the left third to go back, anywhere else to go
+// forward, press and hold to pause (the chrome fades out), drag down to close. Moving between people
+// turns a cube, like the iOS app. On wider layouts the canvas sits centred with arrows beside it.
+
+struct StoryViewer: View {
+    @Bindable var store: AppStore
+    @State private var forward = true
+    @State private var dragOffset: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geo in
+            let isPhone = store.layoutMode == .phone
+            let canvas = canvasSize(in: geo.size, isPhone: isPhone)
+            let dragProgress = min(1, max(0, dragOffset) / 400)
+
+            ZStack {
+                Color.black
+                    .opacity(isPhone ? 1 - dragProgress * 0.7 : 0.94 - dragProgress * 0.6)
+                    .ignoresSafeArea()
+                    .onTapGesture { if !isPhone { store.closeStory() } }
+
+                if let tray = store.storyViewer {
+                    StoryCanvas(tray: tray, store: store, isPhone: isPhone) { delta in
+                        move(delta)
+                    }
+                    .frame(width: canvas.width, height: canvas.height)
+                    .clipShape(.rect(cornerRadius: isPhone ? 0 : 10, style: .continuous))
+                    .id(tray.id)
+                    .transition(.cube(forward: forward, width: canvas.width))
+                    .zIndex(1)
+                }
+
+                if !isPhone {
+                    HStack(spacing: 0) {
+                        sideButton("chevron.left", enabled: store.adjacentStory(-1) != nil) { move(-1) }
+                        Spacer().frame(width: canvas.width + 36)
+                        sideButton("chevron.right", enabled: store.adjacentStory(1) != nil) { move(1) }
+                    }
+                    .zIndex(2)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .offset(y: max(0, dragOffset))
+            .scaleEffect(1 - dragProgress * 0.15)
+            .gesture(
+                DragGesture(minimumDistance: 24)
+                    .onChanged { value in
+                        if abs(value.translation.height) > abs(value.translation.width) {
+                            dragOffset = value.translation.height
+                        }
+                    }
+                    .onEnded { value in
+                        if value.translation.height > 140 || value.predictedEndTranslation.height > 320 {
+                            store.closeStory()
+                        } else if abs(value.translation.width) > 90 && abs(value.translation.width) > abs(value.translation.height) {
+                            move(value.translation.width < 0 ? 1 : -1)
+                        }
+                        withAnimation(.spring(duration: 0.3, bounce: 0.2)) { dragOffset = 0 }
+                    }
+            )
+            .overlay(alignment: .topTrailing) {
+                if !isPhone {
+                    Button { store.closeStory() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(12)
+                }
+            }
+        }
+        // Arrow and space keys are handled by the focused canvas; these bubble up from it.
+        .onKeyPress(.escape) {
+            store.closeStory()
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            move(-1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            move(1)
+            return .handled
+        }
+    }
+
+    private func canvasSize(in size: CGSize, isPhone: Bool) -> CGSize {
+        if isPhone { return size }
+        let height = min(size.height - 32, 920)
+        return CGSize(width: (height * 9 / 16).rounded(), height: height.rounded())
+    }
+
+    private func move(_ delta: Int) {
+        forward = delta > 0
+        withAnimation(.spring(duration: 0.5, bounce: 0.04)) {
+            store.showAdjacentStory(delta)
+        }
+    }
+
+    private func sideButton(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.black)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.white.opacity(0.9)))
+        }
+        .buttonStyle(PressableButtonStyle(scale: 0.88))
+        .opacity(enabled ? 1 : 0)
+        .disabled(!enabled)
+    }
+}
+
+// MARK: One person's story
+
+private struct StoryCanvas: View {
+    let tray: IGStoryTray
+    @Bindable var store: AppStore
+    let isPhone: Bool
+    let onLeaveTray: (Int) -> Void
+
+    @State private var index: Int
+    @State private var clock = StoryClock()
+    @State private var isHolding = false
+    @State private var player = AVPlayer()
+    @State private var isMediaReady = false
+    @State private var isMuted = false
+    @State private var pressStart: Date?
+    @FocusState private var isFocused: Bool
+
+    init(tray: IGStoryTray, store: AppStore, isPhone: Bool, onLeaveTray: @escaping (Int) -> Void) {
+        self.tray = tray
+        self.store = store
+        self.isPhone = isPhone
+        self.onLeaveTray = onLeaveTray
+        _index = State(initialValue: tray.resumeIndex)
+    }
+
+    private var slide: IGMediaItem? { tray.slides[safe: index] }
+
+    var body: some View {
+        ZStack {
+            Color(white: 0.08)
+
+            media
+
+            if !isMediaReady || slide == nil {
+                if tray.slides.isEmpty && !store.isLoadingStory(tray.id) {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.circle")
+                            .font(.system(size: 28))
+                        Text("Hikaye yüklenemedi")
+                            .font(.system(size: 14, weight: .semibold))
+                        Button("Tekrar Dene") { Task { await store.loadStorySlides(for: tray) } }
+                            .buttonStyle(.glass)
+                    }
+                    .foregroundStyle(.white)
+                } else {
+                    ProgressView().tint(.white).controlSize(.large)
+                }
+            }
+
+            touchLayer
+
+            chrome
+                .opacity(isHolding ? 0 : 1)
+                .animation(.easeOut(duration: 0.2), value: isHolding)
+        }
+        .task(id: "\(tray.slides.count)-\(index)") { await play() }
+        .onChange(of: clock.isPaused) { _, paused in
+            if paused { player.pause() } else if slide?.videoURL != nil { player.play() }
+        }
+        .onChange(of: isMuted) { _, muted in player.isMuted = muted }
+        .onChange(of: tray.slides.count) { old, _ in
+            if old == 0 { index = tray.resumeIndex }
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isFocused)
+        .onAppear { isFocused = true }
+        .onDisappear {
+            clock.stop()
+            player.pause()
+            player.replaceCurrentItem(with: nil)
+        }
+        .onKeyPress(.leftArrow) {
+            step(-1)
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            step(1)
+            return .handled
+        }
+        .onKeyPress(.space) {
+            clock.isPaused.toggle()
+            return .handled
+        }
+    }
+
+    // MARK: Media
+
+    @ViewBuilder
+    private var media: some View {
+        if let slide {
+            if slide.videoURL != nil {
+                PlayerSurface(player: player, showsControls: false, fillsFrame: true)
+                    .allowsHitTesting(false)
+            } else {
+                CachedImage(url: slide.imageURL, maxPixelSize: 1440) { _ in Color.clear }
+                    .id(slide.id)
+            }
+        }
+    }
+
+    private func play() async {
+        clock.stop()
+        isMediaReady = false
+        guard let slide else { return }
+        let next = tray.slides[safe: index + 1]
+        ImagePipeline.shared.prefetch([next?.imageURL], maxPixelSize: 1440)
+
+        var duration: Double = 5
+        if let videoURL = slide.videoURL {
+            let asset = AVURLAsset(url: videoURL)
+            let item = AVPlayerItem(asset: asset)
+            player.replaceCurrentItem(with: item)
+            player.isMuted = isMuted
+            if let loaded = try? await asset.load(.duration), loaded.seconds.isFinite, loaded.seconds > 0 {
+                duration = loaded.seconds
+            } else {
+                duration = slide.duration ?? 15
+            }
+            guard !Task.isCancelled else { return }
+            player.play()
+        } else {
+            player.replaceCurrentItem(with: nil)
+            if let url = slide.imageURL {
+                _ = await ImagePipeline.shared.image(for: url, maxPixelSize: 1440)
+            }
+            guard !Task.isCancelled else { return }
+        }
+        isMediaReady = true
+        clock.start(duration: duration) { step(1) }
+    }
+
+    private func step(_ delta: Int) {
+        let target = index + delta
+        if target < 0 {
+            if store.adjacentStory(-1) != nil {
+                onLeaveTray(-1)
+            } else {
+                clock.restart()
+                if slide?.videoURL != nil { player.seek(to: .zero) }
+            }
+        } else if target >= tray.slides.count {
+            onLeaveTray(1)
+        } else {
+            index = target
+        }
+    }
+
+    // MARK: Touch
+
+    /// Taps advance or go back; holding pauses. One gesture so a hold never also counts as a tap.
+    private var touchLayer: some View {
+        GeometryReader { geo in
+            Color.clear
+                .contentShape(.rect)
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            guard pressStart == nil else { return }
+                            pressStart = .now
+                            Task {
+                                try? await Task.sleep(for: .milliseconds(220))
+                                if pressStart != nil {
+                                    isHolding = true
+                                    clock.isPaused = true
+                                }
+                            }
+                        }
+                        .onEnded { value in
+                            let wasHolding = isHolding
+                            pressStart = nil
+                            isHolding = false
+                            clock.isPaused = false
+                            let moved = abs(value.translation.width) > 10 || abs(value.translation.height) > 10
+                            guard !wasHolding, !moved else { return }
+                            step(value.location.x < geo.size.width * 0.3 ? -1 : 1)
+                        }
+                )
+        }
+    }
+
+    // MARK: Chrome
+
+    private var chrome: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 10) {
+                StoryProgressBar(count: max(tray.slides.count, 1), index: index, clock: clock)
+
+                HStack(spacing: 8) {
+                    Button {
+                        store.openProfile(of: tray.user)
+                    } label: {
+                        HStack(spacing: 8) {
+                            AvatarView(url: tray.title == nil ? tray.user.avatarURL : (tray.coverURL ?? tray.user.avatarURL), size: 32)
+                            Text(tray.title ?? tray.user.username)
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .lineLimit(1)
+                            if tray.user.isVerified && tray.title == nil {
+                                VerifiedBadge(size: 11)
+                            }
+                            if let date = slide?.takenAt {
+                                Text(date.igAge)
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(.white.opacity(0.7))
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 4)
+
+                    if clock.isPaused && !isHolding {
+                        Image(systemName: "pause.fill")
+                            .font(.system(size: 15))
+                            .transition(.scale.combined(with: .opacity))
+                    }
+
+                    if slide?.videoURL != nil {
+                        chromeButton(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") { isMuted.toggle() }
+                    }
+
+                    Menu {
+                        Button {
+                            NSWorkspace.shared.open(URL(string: "https://www.instagram.com/stories/\(tray.user.username)/")!)
+                        } label: {
+                            Label("Tarayıcıda Aç", systemImage: "safari")
+                        }
+                        Button {
+                            store.openProfile(of: tray.user)
+                        } label: {
+                            Label("Profili Gör", systemImage: "person.crop.circle")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 17, weight: .bold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(.rect)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+
+                    if isPhone {
+                        chromeButton("xmark") { store.closeStory() }
+                    }
+                }
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, isPhone ? 10 : 12)
+            .padding(.bottom, 26)
+            .background(
+                LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+            )
+
+            Spacer()
+        }
+    }
+
+    private func chromeButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: Progress
+
+/// Drives a story's progress. Only the progress bar reads `progress`, so ticking does not redraw the media.
+@MainActor
+@Observable
+final class StoryClock {
+    var progress: Double = 0
+    var isPaused = false
+    private var task: Task<Void, Never>?
+
+    func start(duration: Double, onFinish: @escaping @MainActor () -> Void) {
+        task?.cancel()
+        progress = 0
+        task = Task { [weak self] in
+            var last = ContinuousClock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard let self, !Task.isCancelled else { return }
+                let now = ContinuousClock.now
+                let elapsed = now - last
+                last = now
+                guard !self.isPaused else { continue }
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                self.progress = min(1, self.progress + seconds / max(duration, 0.5))
+                if self.progress >= 1 {
+                    onFinish()
+                    return
+                }
+            }
+        }
+    }
+
+    func restart() { progress = 0 }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+        progress = 0
+    }
+}
+
+private struct StoryProgressBar: View {
+    let count: Int
+    let index: Int
+    let clock: StoryClock
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<count, id: \.self) { position in
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(.white.opacity(0.35))
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(.white)
+                                .frame(width: geo.size.width * fill(position))
+                        }
+                }
+                .frame(height: 2)
+            }
+        }
+    }
+
+    private func fill(_ position: Int) -> CGFloat {
+        if position < index { return 1 }
+        if position > index { return 0 }
+        return clock.progress
+    }
+}
+
+// MARK: Cube transition
+
+private struct CubeFace: ViewModifier {
+    let angle: Double
+    let offset: CGFloat
+    let anchor: UnitPoint
+
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), anchor: anchor, perspective: 0.5)
+            .offset(x: offset)
+    }
+}
+
+extension AnyTransition {
+    /// The face of a cube turning left (`forward`) or right, the way Instagram moves between people's stories.
+    static func cube(forward: Bool, width: CGFloat) -> AnyTransition {
+        let sign: Double = forward ? 1 : -1
+        return .asymmetric(
+            insertion: .modifier(
+                active: CubeFace(angle: 90 * sign, offset: width * sign, anchor: forward ? .leading : .trailing),
+                identity: CubeFace(angle: 0, offset: 0, anchor: forward ? .leading : .trailing)
+            ),
+            removal: .modifier(
+                active: CubeFace(angle: -90 * sign, offset: -width * sign, anchor: forward ? .trailing : .leading),
+                identity: CubeFace(angle: 0, offset: 0, anchor: forward ? .trailing : .leading)
+            )
+        )
+    }
+}
