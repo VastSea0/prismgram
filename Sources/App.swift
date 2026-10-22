@@ -7,7 +7,7 @@ struct InstagramMacApp: App {
     @State private var store = AppStore()
 
     var body: some Scene {
-        WindowGroup {
+        Window("Prismgram", id: "main") {
             ContentView(store: store)
         }
         .commands {

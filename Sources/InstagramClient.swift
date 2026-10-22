@@ -56,13 +56,15 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         view.isInspectable = true
         webView = view
 
-        // A window that is "on screen" keeps WebKit from throttling the page, but nobody can see or touch it.
-        let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.alphaValue = 0.01
+        // Offscreen host window so WebKit maintains full layout/JS execution without interfering with SwiftUI WindowGroup.
+        let offscreenFrame = NSRect(x: -16000, y: -16000, width: Self.engineSize.width, height: Self.engineSize.height)
+        let window = NSWindow(contentRect: offscreenFrame, styleMask: [.borderless], backing: .buffered, defer: true)
+        window.alphaValue = 0.0
         window.ignoresMouseEvents = true
         window.hasShadow = false
         window.isReleasedWhenClosed = false
         window.isExcludedFromWindowsMenu = true
+        window.canHide = false
         window.collectionBehavior = [.transient, .ignoresCycle, .stationary]
         window.contentView = view
         hostWindow = window
@@ -71,7 +73,6 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
         view.navigationDelegate = self
         controller.add(NetworkTapProxy(client: self), name: "igTap")
-        window.orderBack(nil)
     }
 
     // MARK: Session
@@ -87,6 +88,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     }
 
     func prepare() async {
+        hostWindow.orderBack(nil)
         isReady = false
         if let url = URL(string: "https://www.instagram.com/") {
             webView.load(URLRequest(url: url))

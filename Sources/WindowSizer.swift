@@ -41,7 +41,10 @@ struct WindowSizer: NSViewRepresentable {
             y = max(screen.minY + 10, min(y, screen.maxY - height - 10))
 
             window.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true, animate: !isFirst)
-            if isFirst { window.center() }
+            if isFirst {
+                window.center()
+                window.makeKeyAndOrderFront(nil)
+            }
         }
     }
 }
