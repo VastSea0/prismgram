@@ -206,7 +206,8 @@ private struct ProfileHeader: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .disabled(action == nil)
+        .foregroundStyle(.primary)
+        .allowsHitTesting(action != nil)
     }
 
     @ViewBuilder

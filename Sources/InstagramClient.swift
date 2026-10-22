@@ -32,6 +32,8 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     private static let readinessTimeout: Duration = .seconds(20)
 
     static let appID = "936619743392459"
+    /// `PRISMGRAM_DEBUG=1` logs each request's path and HTTP status (never bodies) to standard error.
+    static let isDebugging = ProcessInfo.processInfo.environment["PRISMGRAM_DEBUG"] != nil
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
     private static let engineSize = NSSize(width: 1100, height: 900)
 
@@ -221,6 +223,10 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             raw = try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
         }
 
+        if Self.isDebugging {
+            let status = ((raw as? String)?.data(using: .utf8)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["status"] ?? "?"
+            FileHandle.standardError.write(Data("[prismgram] \(method) \(path) -> \(status)\n".utf8))
+        }
         guard let text = raw as? String,
               let envelopeData = text.data(using: .utf8),
               let envelope = try JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
@@ -295,6 +301,16 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             }
         }
         return nil
+    }
+
+    /// Scrolls the page to its end, which makes instagram.com load the next page of whatever grid it shows.
+    func scrollToBottom() async {
+        _ = await evaluate("""
+        const main = document.scrollingElement || document.documentElement;
+        main.scrollTo(0, main.scrollHeight);
+        window.dispatchEvent(new Event('scroll'));
+        return true;
+        """)
     }
 
     func currentPath() async -> String? {

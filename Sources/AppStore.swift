@@ -55,7 +55,8 @@ final class AppStore {
             isInspectorShown = layoutMode == .desktop
         }
     }
-    private(set) var tab: InstagramTab = .home
+    /// `PRISMGRAM_TAB=<tab>` picks the first tab for one run (handy for testing).
+    private(set) var tab: InstagramTab = InstagramTab(rawValue: ProcessInfo.processInfo.environment["PRISMGRAM_TAB"] ?? "") ?? .home
     var isInspectorShown = false
     var profileUserID: String?
     var profileUsername: String?
@@ -107,6 +108,11 @@ final class AppStore {
     private(set) var profileStack: [IGUser] = []
     private var profileReturnTab: InstagramTab?
     private var profileToken = UUID()
+    /// While the hidden page is opening a profile: whose (lowercased username), and what its queries delivered.
+    private var pageProfileTarget: String?
+    private var pageProfileUser: IGUser?
+    /// The profile grid the hidden page is currently feeding.
+    private var capture: ProfileSection?
     /// Set when "Message" is pressed on a profile with no existing chat, so the inbox opens filtered to that person.
     var pendingDirectSearch: String?
 
@@ -159,7 +165,7 @@ final class AppStore {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         let opName = event.label.components(separatedBy: " #").first ?? ""
-        if SchemaDump.folder != nil, opName.hasPrefix("IGD") || opName.contains("Direct") {
+        if SchemaDump.folder != nil, opName.hasPrefix("IGD") || opName.hasPrefix("Polaris") || opName.contains("Direct") {
             SchemaDump.write(json, name: opName)
         }
 
@@ -185,12 +191,41 @@ final class AppStore {
                 directPhase = .loaded
             }
 
+        case "PolarisProfilePageContentQuery":
+            if let target = pageProfileTarget,
+               let userDict = (json["data"] as? [String: Any])?["user"] as? [String: Any],
+               let user = IGJSON.user(userDict), user.username.lowercased() == target {
+                pageProfileUser = user
+            }
+
+        case "PolarisProfilePostsQuery":
+            if let target = pageProfileTarget, capture == .posts,
+               let connection = (json["data"] as? [String: Any])?["xdt_api__v1__feed__user_timeline_graphql_connection"] as? [String: Any] {
+                let edges = (connection["edges"] as? [[String: Any]]) ?? []
+                let posts = edges.compactMap { ($0["node"] as? [String: Any]).flatMap(IGJSON.post) }
+                if posts.allSatisfy({ $0.user.username.lowercased() == target }) {
+                    let hasMore = IGJSON.bool((connection["page_info"] as? [String: Any])?["has_next_page"])
+                    receiveProfilePosts(posts, for: .posts, hasMore: hasMore)
+                }
+            }
+
+        case "PolarisProfileStoryHighlightsTrayContentQuery":
+            if pageProfileTarget != nil, let owner = profile {
+                let parsed = IGJSON.highlights(from: json, fallbackUser: owner).filter { $0.user.id == owner.id }
+                if !parsed.isEmpty { profileHighlights = parsed }
+            }
+
         case "IGDThreadDetailQuery":
             if let detailed = IGJSON.directThreadDetail(from: json) {
                 mergeDetailedThread(detailed)
             }
 
         default:
+            if let section = capture, section != .posts, pageProfileTarget != nil,
+               !opName.contains("Ads"), !opName.contains("Suggested") {
+                let posts = IGJSON.collectPosts(in: json)
+                if !posts.isEmpty { receiveProfilePosts(posts, for: section, hasMore: nil) }
+            }
             if event.url.contains("reels_media") {
                 for trayID in loadingStoryIDs {
                     let slides = IGJSON.storySlides(from: json, reelID: trayID)
@@ -258,6 +293,9 @@ final class AppStore {
 
     private func resetProfileContent(placeholder: IGUser?) {
         profileToken = UUID()
+        pageProfileTarget = nil
+        pageProfileUser = nil
+        capture = nil
         profile = placeholder
         profileGrids = [:]
         profileHighlights = []
@@ -360,6 +398,10 @@ final class AppStore {
             throw RequestFailure(message: "Instagram istekleri geçici olarak sınırladı. Birkaç dakika sonra yenileyin.")
         }
         guard (200..<300).contains(response.status), let json = response.json else {
+            if InstagramClient.isDebugging {
+                let detail = (response.json?["message"] as? String) ?? (response.json == nil ? "non-JSON body" : "-")
+                FileHandle.standardError.write(Data("[prismgram] rejected \(path): \(detail)\n".utf8))
+            }
             let reason = (response.json?["feedback_message"] as? String)
                 ?? (response.json?["message"] as? String)
                 ?? "Instagram isteği reddetti (HTTP \(response.status))."
@@ -920,46 +962,72 @@ final class AppStore {
 
     // MARK: Profile
 
+    /// Loads a profile the way instagram.com does: the hidden page opens `/<username>/`, and the
+    /// header, first grid page and highlights are read from the page's own queries. Calling Instagram's
+    /// older REST endpoints directly gets the account rate limited ("feedback_required").
     func loadProfile() async {
         guard profilePhase != .loading else { return }
         profilePhase = .loading
         let token = profileToken
 
-        let targetID = profileUserID ?? viewerID
-        var username = profileUsername ?? (targetID == viewerID ? viewerUsername : nil)
-        if username == nil, targetID == viewerID, let detected = await client.detectViewerUsername() {
-            viewerUsername = detected
-            username = detected
-        }
-
-        var loaded: IGUser?
-        var failure: Error?
-        do {
-            if let username, !username.isEmpty {
-                let json = try await fetch("/api/v1/users/web_profile_info/?username=\(encode(username))")
-                loaded = ((json["data"] as? [String: Any])?["user"] as? [String: Any]).flatMap(IGJSON.graphUser)
-            }
-            if loaded == nil, let id = targetID {
-                let json = try await fetch("/api/v1/users/\(id)/info/")
-                loaded = (json["user"] as? [String: Any]).flatMap(IGJSON.user)
-            }
-        } catch {
-            failure = error
+        var username = profileUsername
+        if username == nil, (profileUserID ?? viewerID) == viewerID {
+            username = await resolveViewerUsername()
         }
         guard token == profileToken else { return }
+        guard let username, !username.isEmpty else {
+            profilePhase = profile == nil ? .failed("Kullanıcı adın bulunamadı. Yenilemeyi dene.") : .loaded
+            return
+        }
 
+        let loaded = await openProfilePage(username: username, token: token)
+        guard token == profileToken else { return }
         guard let user = loaded?.merged(over: profile) else {
-            profilePhase = profile == nil ? .failed(failure.map(message(for:)) ?? "Profil bulunamadı.") : .loaded
+            profilePhase = profile == nil ? .failed("Profil yüklenemedi. İnternet bağlantını kontrol edip yenile.") : .loaded
             return
         }
         profile = user
         if user.id == viewerID { viewerUsername = user.username }
         profilePhase = .loaded
-
-        Task { await loadHighlights(for: user.id, token: token) }
-        if canSeeContent(of: user) {
+        if profileSection != .posts, canSeeContent(of: user) {
             await loadProfileSection(profileSection)
         }
+    }
+
+    /// The signed-in account's username: known already, from the edit-profile endpoint the web app uses,
+    /// from the page, or from any loaded tray, note or post of the viewer's.
+    private func resolveViewerUsername() async -> String? {
+        if let viewerUsername { return viewerUsername }
+        if let response = try? await client.request("/api/v1/accounts/current_user/?edit=true"),
+           (200..<300).contains(response.status),
+           let name = (response.json?["user"] as? [String: Any])?["username"] as? String, !name.isEmpty {
+            viewerUsername = name
+            return name
+        }
+        var name = viewer?.username
+        if name == nil { name = await client.detectViewerUsername() }
+        if let name { viewerUsername = name }
+        return name
+    }
+
+    /// Opens `/<username>/` in the hidden page and waits for its profile query (matched by username so a
+    /// late response for another profile is ignored). The posts and highlights queries that come with it
+    /// fill the grid and the highlights row as they arrive.
+    private func openProfilePage(username: String, token: UUID) async -> IGUser? {
+        pageProfileTarget = username.lowercased()
+        pageProfileUser = nil
+        capture = .posts
+        _ = await client.navigate(to: "/\(username)/")
+        for _ in 0..<60 {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard token == profileToken else { return nil }
+            if pageProfileUser != nil && profileGrids[.posts]?.phase == .loaded { break }
+        }
+        if pageProfileUser != nil, profileGrids[.posts] == nil {
+            // The posts query never came (private account, or still on its way): show an empty, finished grid.
+            profileGrids[.posts] = PostPage(phase: .loaded)
+        }
+        return pageProfileUser
     }
 
     func canSeeContent(of user: IGUser) -> Bool {
@@ -978,84 +1046,56 @@ final class AppStore {
         }
     }
 
-    /// Loads the first page of a profile grid, or the next page when `more` is set.
+    /// Loads a profile grid by opening its tab in the hidden page (`/<username>/reels/` …), or the next page
+    /// by scrolling the hidden page, exactly as a visitor of instagram.com would. Posts arrive through
+    /// `handleNetworkEvent` while `capture` names the section.
     func loadProfileSection(_ section: ProfileSection, more: Bool = false) async {
         guard let user = profile, canSeeContent(of: user) else { return }
+        let token = profileToken
         var page = profileGrids[section] ?? PostPage()
+        let before = page.items.count
+
         if more {
-            guard page.cursor != nil, !page.isLoadingMore, page.phase == .loaded else { return }
+            guard page.cursor != nil, !page.isLoadingMore, page.phase == .loaded, capture == section || section == .posts else { return }
             page.isLoadingMore = true
             profileGrids[section] = page
+            capture = section
+            await client.scrollToBottom()
         } else {
             guard page.phase != .loading else { return }
-            page = PostPage(phase: .loading)
-            profileGrids[section] = page
+            profileGrids[section] = PostPage(phase: .loading)
+            capture = section
+            _ = await client.navigate(to: section.path(for: user.username))
         }
-        let token = profileToken
-        let cursor = more ? page.cursor : nil
 
-        do {
-            let (posts, next) = try await fetchSection(section, userID: user.id, cursor: cursor)
+        for _ in 0..<(more ? 24 : 40) {
+            try? await Task.sleep(for: .milliseconds(250))
             guard token == profileToken else { return }
-            var updated = profileGrids[section] ?? PostPage()
-            let known = Set(updated.items.map(\.id))
-            updated.items = more ? updated.items + posts.filter { !known.contains($0.id) } : posts
-            updated.cursor = next
-            updated.phase = .loaded
-            updated.isLoadingMore = false
-            profileGrids[section] = updated
-        } catch {
-            guard token == profileToken else { return }
-            var updated = profileGrids[section] ?? PostPage()
-            updated.isLoadingMore = false
-            if more {
-                updated.cursor = nil
-            } else {
-                updated.phase = .failed(message(for: error))
-            }
-            profileGrids[section] = updated
+            let current = profileGrids[section] ?? PostPage()
+            if current.items.count > (more ? before : 0) { break }
+            if !more, current.phase == .loaded { break }
         }
+        guard token == profileToken else { return }
+        var updated = profileGrids[section] ?? PostPage()
+        if more && updated.items.count == before { updated.cursor = nil }
+        updated.isLoadingMore = false
+        updated.phase = .loaded
+        profileGrids[section] = updated
     }
 
-    private func fetchSection(_ section: ProfileSection, userID: String, cursor: String?) async throws -> ([IGPost], String?) {
-        let maxID = cursor.map { "&max_id=\(encode($0))" } ?? ""
-        switch section {
-        case .posts:
-            let json = try await fetch("/api/v1/feed/user/\(userID)/?count=12\(maxID)")
-            let posts = ((json["items"] as? [[String: Any]]) ?? []).compactMap(IGJSON.post)
-            return (posts, Self.nextCursor(json))
-        case .reels:
-            let json = try await fetch(
-                "/api/v1/clips/user/",
-                method: "POST",
-                body: "target_user_id=\(encode(userID))&page_size=12&include_feed_video=true\(maxID)"
-            )
-            let paging = json["paging_info"] as? [String: Any]
-            let more = IGJSON.bool(paging?["more_available"]) ?? false
-            return (IGJSON.collectPosts(in: json["items"] ?? []), more ? IGJSON.string(paging?["max_id"]) : nil)
-        case .tagged:
-            let json = try await fetch("/api/v1/usertags/\(userID)/feed/?count=12\(maxID)")
-            return (IGJSON.collectPosts(in: json["items"] ?? []), Self.nextCursor(json))
-        case .saved:
-            let json = try await fetch("/api/v1/feed/saved/posts/?\(maxID.dropFirst())")
-            return (IGJSON.collectPosts(in: json["items"] ?? []), Self.nextCursor(json))
+    /// Adds posts the hidden page received to the grid that is being captured.
+    private func receiveProfilePosts(_ posts: [IGPost], for section: ProfileSection, hasMore: Bool?) {
+        var page = profileGrids[section] ?? PostPage()
+        let known = Set(page.items.map(\.id))
+        let fresh = posts.filter { !known.contains($0.id) }
+        page.items += fresh
+        page.phase = .loaded
+        if let hasMore {
+            page.cursor = hasMore ? "page" : nil
+        } else if !fresh.isEmpty {
+            page.cursor = "page"
         }
-    }
-
-    private static func nextCursor(_ json: [String: Any]) -> String? {
-        guard IGJSON.bool(json["more_available"]) ?? (json["next_max_id"] != nil) else { return nil }
-        return IGJSON.string(json["next_max_id"])
-    }
-
-    private func loadHighlights(for userID: String, token: UUID) async {
-        guard let json = try? await fetch("/api/v1/highlights/\(userID)/highlights_tray/"),
-              token == profileToken else { return }
-        let tray = ((json["tray"] as? [[String: Any]]) ?? []).compactMap(IGJSON.storyTray)
-        profileHighlights = tray.map { highlight in
-            var item = highlight
-            if item.title == nil { item.title = "Öne Çıkan" }
-            return item
-        }
+        profileGrids[section] = page
     }
 
     func toggleFollow(_ user: IGUser) {

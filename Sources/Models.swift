@@ -113,6 +113,16 @@ enum ProfileSection: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// The instagram.com route that shows this grid.
+    func path(for username: String) -> String {
+        switch self {
+        case .posts: return "/\(username)/"
+        case .reels: return "/\(username)/reels/"
+        case .tagged: return "/\(username)/tagged/"
+        case .saved: return "/\(username)/saved/all-posts/"
+        }
+    }
+
     var filledSymbolName: String {
         switch self {
         case .posts: return "squareshape.split.3x3"
