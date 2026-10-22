@@ -336,6 +336,47 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         return (await evaluate(script, arguments: ["text": text, "expected": threadPathID]) as? Bool) ?? false
     }
 
+    /// Uses the hidden page's own hover controls to react to (`"react"`) or start a reply to (`"reply"`)
+    /// the newest message with this text, in the thread the page is verifiably showing.
+    func performMessageAction(_ action: String, messageText: String, emoji: String?, threadPathID: String) async -> Bool {
+        let script = """
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
+        const main = document.querySelector('div[role="main"]') || document.body;
+        const exact = Array.from(main.querySelectorAll('div[dir="auto"], span[dir="auto"], div, span'))
+            .filter(e => (e.innerText || '').trim() === text);
+        const target = exact[exact.length - 1];
+        if (!target) { return false; }
+        const row = target.closest('div[role="row"], div[role="gridcell"]') || target.parentElement;
+        const fire = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        for (let el = target, i = 0; el && i < 8; el = el.parentElement, i++) {
+            ['pointerover', 'mouseover', 'pointerenter', 'mouseenter', 'pointermove', 'mousemove'].forEach(t => fire(el, t));
+        }
+        await sleep(400);
+        const pattern = action === 'react' ? /react|tepki|ifade/i : /reply|yanıt/i;
+        const scope = (row && row.querySelectorAll('[aria-label]').length) ? row : main;
+        const labelled = Array.from(scope.querySelectorAll('[aria-label]'))
+            .filter(e => pattern.test(e.getAttribute('aria-label') || ''));
+        const button = labelled.map(e => e.closest('[role="button"], button') || e).pop();
+        if (!button) { return false; }
+        button.click();
+        if (action !== 'react') { return true; }
+        await sleep(500);
+        const options = Array.from(document.querySelectorAll('[role="button"], button, [role="menuitem"], [role="option"]'));
+        const option = options.find(e => {
+            const label = (e.innerText || e.getAttribute('aria-label') || (e.querySelector('img') || {}).alt || '').trim();
+            return label.startsWith(emoji);
+        });
+        if (!option) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return false; }
+        option.click();
+        return true;
+        """
+        let result = await evaluate(script, arguments: [
+            "action": action, "text": messageText, "emoji": emoji ?? "", "expected": threadPathID
+        ])
+        return (result as? Bool) ?? false
+    }
+
     func evaluate(_ script: String, arguments: [String: Any] = [:]) async -> Any? {
         try? await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
     }

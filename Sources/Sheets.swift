@@ -196,3 +196,75 @@ extension Collection {
         indices.contains(index) ? self[index] : nil
     }
 }
+
+// MARK: - In-app Instagram page (signed-in session)
+
+/// Shows an instagram.com page in a sheet with the app's own session, for things that have no native
+/// screen yet (some settings, shared links).
+struct WebPageSheet: View {
+    let request: AppStore.WebPageRequest
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var isLoading = true
+
+    var body: some View {
+        NavigationStack {
+            InstagramPageView(url: request.url, title: $title, isLoading: $isLoading)
+                .overlay(alignment: .top) {
+                    if isLoading { ProgressView().controlSize(.small).padding(8) }
+                }
+                .navigationTitle(request.title ?? (title.isEmpty ? "Instagram" : title))
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Kapat") { dismiss() }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            NSWorkspace.shared.open(request.url)
+                        } label: {
+                            Label("Tarayıcıda Aç", systemImage: "safari")
+                        }
+                    }
+                }
+        }
+        .frame(width: 520, height: 740)
+    }
+}
+
+struct InstagramPageView: NSViewRepresentable {
+    let url: URL
+    @Binding var title: String
+    @Binding var isLoading: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.customUserAgent = InstagramClient.userAgent
+        view.navigationDelegate = context.coordinator
+        view.load(URLRequest(url: url))
+        return view
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let parent: InstagramPageView
+        init(_ parent: InstagramPageView) { self.parent = parent }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            parent.isLoading = true
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            parent.isLoading = false
+            parent.title = webView.title?.replacingOccurrences(of: " • Instagram", with: "") ?? ""
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            parent.isLoading = false
+        }
+    }
+}

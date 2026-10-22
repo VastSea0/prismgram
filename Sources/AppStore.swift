@@ -22,6 +22,12 @@ final class AppStore {
         let message: String
     }
 
+    struct WebPageRequest: Identifiable {
+        let id = UUID()
+        let url: URL
+        var title: String?
+    }
+
     /// One paginated grid of posts.
     struct PostPage {
         var items: [IGPost] = []
@@ -79,6 +85,10 @@ final class AppStore {
     var selectedThreadID: String?
     private(set) var isSendingDirectMessage = false
     private var sendChain: Task<Void, Never>?
+    /// A short message shown over the conversation when an action could not be completed.
+    var directNotice: String?
+    /// An instagram.com page shown in the in-app browser sheet (settings, shared links).
+    var webPage: WebPageRequest?
 
     private(set) var profile: IGUser?
     private(set) var profileGrids: [ProfileSection: PostPage] = [:]
@@ -141,6 +151,9 @@ final class AppStore {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         let opName = event.label.components(separatedBy: " #").first ?? ""
+        if SchemaDump.folder != nil, opName.hasPrefix("IGD") || opName.contains("Direct") {
+            SchemaDump.write(json, name: opName)
+        }
 
         switch opName {
         case "IGDInboxTrayQuery", "PolarisProfileNoteBubbleQuery":
@@ -698,6 +711,102 @@ final class AppStore {
         guard let threadIndex = directThreads.firstIndex(where: { $0.id == threadID }),
               let messageIndex = directThreads[threadIndex].messages.firstIndex(where: { $0.id == messageID }) else { return }
         directThreads[threadIndex].messages[messageIndex].delivery = delivery
+    }
+
+    /// Leaves an emoji reaction. Uses the direct_v2 API when the message's item id is known, otherwise the
+    /// hidden page's own reaction control in the verified thread. Rolled back if neither works.
+    func react(_ emoji: String, to message: IGDirectMessage, in thread: IGDirectThread) {
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+        updateMessage(message.id, in: thread.id) { $0.reactions = [emoji] + $0.reactions.filter { $0 != emoji } }
+        let previous = message.reactions
+        let chain = sendChain
+        sendChain = Task {
+            await chain?.value
+            var done = false
+            if let itemID = message.itemID {
+                for id in Set([thread.id, thread.threadFBID]) where !done && !id.isEmpty {
+                    done = await broadcast(kind: "reaction", fields: [
+                        "thread_ids": "[\"\(id)\"]",
+                        "item_id": itemID,
+                        "node_type": "item",
+                        "reaction_status": "created",
+                        "reaction_type": "like",
+                        "emoji": emoji
+                    ]) != nil
+                }
+            }
+            if !done, !message.text.isEmpty, let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) {
+                done = await client.performMessageAction("react", messageText: message.text, emoji: emoji, threadPathID: pathID)
+            }
+            if !done {
+                updateMessage(message.id, in: thread.id) { $0.reactions = previous }
+                withAnimation { directNotice = "İfade gönderilemedi" }
+            }
+        }
+    }
+
+    /// Replies to a message. The reply appears at once; it is only sent as a real reply, never as plain text.
+    func sendReply(text: String, to target: IGDirectMessage, in thread: IGDirectThread) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = directThreads.firstIndex(where: { $0.id == thread.id }) else { return }
+        let message = IGDirectMessage(
+            id: "local-\(UUID().uuidString)",
+            senderFBID: thread.viewerFBID,
+            senderUsername: viewerUsername,
+            senderAvatarURL: nil,
+            text: trimmed,
+            timestamp: .now,
+            isFromViewer: true,
+            delivery: .sending,
+            replyTo: IGDirectMessage.ReplyQuote(
+                text: target.text.isEmpty ? target.kind.label : target.text,
+                senderUsername: target.senderUsername,
+                isFromViewer: target.isFromViewer
+            )
+        )
+        withAnimation(.spring(duration: 0.35, bounce: 0.18)) {
+            directThreads[index].messages.append(message)
+            directThreads[index].snippet = trimmed
+            directThreads[index].lastActivityAt = .now
+        }
+        let chain = sendChain
+        sendChain = Task {
+            await chain?.value
+            isSendingDirectMessage = true
+            defer { isSendingDirectMessage = false }
+            var sent = false
+            if let itemID = target.itemID {
+                for id in Set([thread.id, thread.threadFBID]) where !sent && !id.isEmpty {
+                    sent = await broadcast(kind: "text", fields: [
+                        "thread_ids": "[\"\(id)\"]",
+                        "text": trimmed,
+                        "replied_to_item_id": itemID
+                    ]) != nil
+                }
+            }
+            if !sent, !target.text.isEmpty, let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]),
+               await client.performMessageAction("reply", messageText: target.text, emoji: nil, threadPathID: pathID) {
+                try? await Task.sleep(for: .milliseconds(250))
+                sent = await client.sendDirectMessage(text: trimmed, threadPathID: pathID)
+            }
+            setDelivery(sent ? .sent : .failed, for: message.id, in: thread.id)
+            if !sent { withAnimation { directNotice = "Yanıt gönderilemedi" } }
+        }
+    }
+
+    private func updateMessage(_ id: String, in threadID: String, _ change: (inout IGDirectMessage) -> Void) {
+        guard let t = directThreads.firstIndex(where: { $0.id == threadID }),
+              let m = directThreads[t].messages.firstIndex(where: { $0.id == id }) else { return }
+        withAnimation(.spring(duration: 0.3, bounce: 0.4)) { change(&directThreads[t].messages[m]) }
+    }
+
+    /// Opens Instagram pages inside the app with the signed-in session; other sites go to the browser.
+    func openWeb(_ url: URL, title: String? = nil) {
+        if let host = url.host?.lowercased(), host.hasSuffix("instagram.com") {
+            webPage = WebPageRequest(url: url, title: title)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func markThreadRead(_ thread: IGDirectThread, _ isRead: Bool = true) {

@@ -32,6 +32,9 @@ struct ContentView: View {
         .sheet(item: $store.detailPost) { post in
             PostDetailView(postID: post.id, fallback: post, store: store)
         }
+        .sheet(item: $store.webPage) { page in
+            WebPageSheet(request: page)
+        }
         .sheet(isPresented: $store.isShowingLogin) {
             LoginSheet(store: store)
         }

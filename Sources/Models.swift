@@ -254,6 +254,62 @@ struct IGDirectMessage: Identifiable, Hashable, Sendable {
     /// Emoji reactions left on the message.
     var reactions: [String] = []
     var delivery: Delivery = .sent
+    var kind: Kind = .text
+    /// What a shared reel, post or story points at.
+    var share: SharePreview? = nil
+    /// The message this one replies to.
+    var replyTo: ReplyQuote? = nil
+    /// The direct_v2 item id, when the response carries one (needed to react through the API).
+    var itemID: String? = nil
+    /// Playable audio for voice messages.
+    var audioURL: URL? = nil
+
+    enum Kind: String, Hashable, Sendable {
+        case text, photo, video, reel, post, story, storyReply, voice, sticker, link, like
+
+        /// Short label Instagram shows for the kind of thing that was sent.
+        var label: String {
+            switch self {
+            case .text: return "Mesaj"
+            case .photo: return "Fotoğraf"
+            case .video: return "Video"
+            case .reel: return "Reels"
+            case .post: return "Gönderi"
+            case .story: return "Hikaye"
+            case .storyReply: return "Hikaye yanıtı"
+            case .voice: return "Sesli mesaj"
+            case .sticker: return "Çıkartma"
+            case .link: return "Bağlantı"
+            case .like: return "Beğeni"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .reel: return "play.rectangle.on.rectangle.fill"
+            case .post: return "square.grid.3x3.fill"
+            case .story, .storyReply: return "circle.dashed"
+            case .video: return "video.fill"
+            case .photo: return "photo.fill"
+            case .voice: return "waveform"
+            case .link: return "link"
+            default: return "bubble.left.fill"
+            }
+        }
+    }
+
+    struct SharePreview: Hashable, Sendable {
+        var title: String?
+        var subtitle: String?
+        var avatarURL: URL?
+        var url: URL?
+    }
+
+    struct ReplyQuote: Hashable, Sendable {
+        var text: String
+        var senderUsername: String?
+        var isFromViewer: Bool
+    }
 }
 
 struct IGDirectThread: Identifiable, Hashable, Sendable {
@@ -602,51 +658,13 @@ enum IGJSON {
         if let slideMessages = dict["slide_messages"] as? [String: Any],
            let edges = slideMessages["edges"] as? [[String: Any]] {
             for edge in edges {
-                guard let node = edge["node"] as? [String: Any] else { continue }
-                let msgID = string(node["message_id"]) ?? string(node["id"]) ?? UUID().uuidString
-                let senderDict = (node["sender"] as? [String: Any])?["user_dict"] as? [String: Any]
-                let senderFBID = string(node["sender_fbid"])
-                    ?? string(senderDict?["interop_messaging_user_fbid"])
-                    ?? string((node["sender"] as? [String: Any])?["id"])
-                    ?? ""
-                let senderUsername = senderDict?["username"] as? String
-                let senderAvatar = url(senderDict?["profile_pic_url"])
-
-                let contentDict = node["content"] as? [String: Any]
-                let textBody = (node["text_body"] as? String)
-                    ?? (contentDict?["text_body"] as? String)
-                    ?? ""
-                let snippetText = (node["igd_snippet"] as? String) ?? ""
-                let contentType = (node["content_type"] as? String) ?? ""
-                let media = attachment(in: node)
-                let fallback = !snippetText.isEmpty ? snippetText : Self.describeContentType(contentType)
-                let display = !textBody.isEmpty ? textBody : (media == nil ? fallback : "")
-                let reactions = ((node["reactions"] as? [[String: Any]]) ?? []).compactMap {
-                    ($0["reaction"] as? String) ?? ($0["emoji"] as? String)
-                }
-
+                guard let node = edge["node"] as? [String: Any],
+                      let message = directMessage(node, viewerFBID: viewerFBID, viewerID: viewerID, fallbackMs: lastMs) else { continue }
                 if latestSnippet.isEmpty {
-                    latestSnippet = !display.isEmpty ? display : fallback
+                    latestSnippet = (node["igd_snippet"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                        ?? (message.text.isEmpty ? message.kind.label : message.text)
                 }
-                guard !display.isEmpty || media != nil else { continue }
-
-                let tsMs = double(node["timestamp_ms"]) ?? lastMs
-                let date = tsMs > 0 ? Date(timeIntervalSince1970: tsMs / 1000.0) : lastDate
-                let fromViewer = !viewerFBID.isEmpty && (senderFBID == viewerFBID || senderFBID == viewerID)
-
-                messages.append(
-                    IGDirectMessage(
-                        id: msgID,
-                        senderFBID: senderFBID,
-                        senderUsername: senderUsername,
-                        senderAvatarURL: senderAvatar,
-                        text: display,
-                        timestamp: date,
-                        isFromViewer: fromViewer,
-                        media: media,
-                        reactions: reactions
-                    )
-                )
+                messages.append(message)
             }
         }
 
@@ -668,7 +686,7 @@ enum IGJSON {
     }
 
     /// Finds a photo, video or shared-post preview anywhere in a message node, without descending into the sender.
-    private static func attachment(in node: [String: Any]) -> IGMediaItem? {
+    static func attachment(in node: [String: Any]) -> IGMediaItem? {
         var found: IGMediaItem?
         func walk(_ value: Any, depth: Int) {
             guard found == nil, depth < 9 else { return }
@@ -711,16 +729,16 @@ enum IGJSON {
         return preview.map { IGMediaItem(id: $0.0.absoluteString, thumbURL: $0.0, imageURL: $0.0, videoURL: nil, aspectRatio: $0.1) }
     }
 
-    private static let skippedAttachmentKeys: Set<String> = ["sender", "replied_to_message", "user_dict", "profile_pic_url", "reactions"]
+    static let skippedAttachmentKeys: Set<String> = ["sender", "replied_to_message", "user_dict", "profile_pic_url", "reactions"]
 
-    private static func isMediaCDN(_ url: URL) -> Bool {
+    static func isMediaCDN(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         let path = url.path.lowercased()
         return (host.contains("cdninstagram.com") || host.contains("fbcdn.net"))
             && !path.hasSuffix(".mp4") && !path.contains("/t51.2885-19/")
     }
 
-    private static func describeContentType(_ type: String) -> String {
+    static func describeContentType(_ type: String) -> String {
         let lower = type.lowercased()
         if lower.contains("reel") || lower.contains("clip") { return "Bir Reels videosu paylaştı" }
         if lower.contains("story") { return "Bir hikaye paylaştı" }
