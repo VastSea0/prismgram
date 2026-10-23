@@ -2,13 +2,36 @@ import Foundation
 import AppKit
 import WebKit
 
+/// Seam between `AppStore` / `InstagramAPI` and the underlying Instagram session transport.
+@MainActor
+protocol InstagramTransport: AnyObject {
+    var onNetworkEvent: ((InstagramClient.NetworkEvent) -> Void)? { get set }
+    func viewerID() async -> String?
+    func prepare() async
+    func setNetworkTap(pattern: String?)
+    func detectViewerUsername() async -> String?
+    func request(_ path: String, method: String, body: String?) async throws -> InstagramClient.Response
+    func withPage<T>(_ purpose: String, _ body: () async throws -> T) async rethrows -> T
+    @discardableResult func navigate(to path: String) async -> String?
+    func scrollToBottom() async
+    func openDirectThread(ids: [String]) async -> String?
+    func sendDirectMessage(text: String, threadPathID: String) async -> Bool
+    func performMessageAction(_ action: String, messageText: String, emoji: String?, threadPathID: String) async -> Bool
+}
+
+extension InstagramTransport {
+    func request(_ path: String, method: String = "GET", body: String? = nil) async throws -> InstagramClient.Response {
+        try await request(path, method: method, body: body)
+    }
+}
+
 /// The Instagram web app, running for real inside an invisible window.
 ///
 /// The native interface never shows this view. It exists so that every request is made by the
 /// genuine web client with the signed-in user's own session, and so the native layer can read
 /// what the page receives and drive the page when an action has no direct endpoint.
 @MainActor
-final class InstagramClient: NSObject, WKNavigationDelegate {
+final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport {
     struct Response {
         let status: Int
         let json: [String: Any]?

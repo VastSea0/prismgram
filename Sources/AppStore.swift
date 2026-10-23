@@ -37,7 +37,8 @@ final class AppStore {
         var isLoadingMore = false
     }
 
-    let client = InstagramClient()
+    let client: any InstagramTransport
+    let api: InstagramAPI
 
     // Session
     private(set) var session: Session = .unknown
@@ -119,7 +120,9 @@ final class AppStore {
     var profilePosts: [IGPost] { profileGrids[.posts]?.items ?? [] }
     var isViewingOtherProfile: Bool { profileUserID != nil }
 
-    init() {
+    init(client: any InstagramTransport = InstagramClient()) {
+        self.client = client
+        self.api = InstagramAPI(transport: client)
         client.onNetworkEvent = { [weak self] event in
             self?.handleNetworkEvent(event)
         }
@@ -382,40 +385,20 @@ final class AppStore {
 
     // MARK: Requests
 
-    private func fetch(_ path: String, method: String = "GET", body: String? = nil) async throws -> [String: Any] {
-        let response: InstagramClient.Response
+    /// Runs an `InstagramAPI` call and signs the user out if the session has expired.
+    private func run<T>(_ operation: (InstagramAPI) async throws -> T) async throws -> T {
         do {
-            response = try await client.request(path, method: method, body: body)
-        } catch {
-            throw RequestFailure(message: "Instagram'a bağlanılamadı.")
-        }
-
-        if response.status == 401 || (response.json?["message"] as? String) == "login_required" {
+            return try await operation(api)
+        } catch InstagramAPI.Failure.unauthorized {
             session = .signedOut
             throw RequestFailure(message: "Oturum süresi doldu. Yeniden giriş yapın.")
-        }
-        if response.status == 429 {
-            throw RequestFailure(message: "Instagram istekleri geçici olarak sınırladı. Birkaç dakika sonra yenileyin.")
-        }
-        guard (200..<300).contains(response.status), let json = response.json else {
-            if InstagramClient.isDebugging {
-                let detail = (response.json?["message"] as? String) ?? (response.json == nil ? "non-JSON body" : "-")
-                FileHandle.standardError.write(Data("[prismgram] rejected \(path): \(detail)\n".utf8))
-            }
-            let reason = (response.json?["feedback_message"] as? String)
-                ?? (response.json?["message"] as? String)
-                ?? "Instagram isteği reddetti (HTTP \(response.status))."
+        } catch InstagramAPI.Failure.rejected(let reason) {
             throw RequestFailure(message: reason)
         }
-        return json
     }
 
     private func message(for error: Error) -> String {
         (error as? RequestFailure)?.message ?? "Beklenmeyen bir hata oluştu."
-    }
-
-    private func encode(_ text: String) -> String {
-        text.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? text
     }
 
     // MARK: Loaders
@@ -424,14 +407,14 @@ final class AppStore {
         guard feedPhase != .loading else { return }
         feedPhase = .loading
         do {
-            if let trayJSON = try? await fetch("/api/v1/feed/reels_tray/") {
+            if let trayJSON = try? await run({ try await $0.reelsTray() }) {
                 let tray = (trayJSON["tray"] as? [[String: Any]]) ?? []
                 stories = tray.compactMap(IGJSON.storyTray)
                 if let ownTray = stories.first(where: { $0.user.id == viewerID }) {
                     viewerUsername = ownTray.user.username
                 }
             }
-            let json = try await fetch("/api/v1/feed/timeline/", method: "POST", body: "reason=cold_start_fetch&is_pull_to_refresh=0")
+            let json = try await run { try await $0.timeline() }
             feed = Self.feedPosts(from: json)
             feedCursor = IGJSON.string(json["next_max_id"])
             feedPhase = .loaded
@@ -448,11 +431,7 @@ final class AppStore {
         isLoadingMoreFeed = true
         defer { isLoadingMoreFeed = false }
         do {
-            let json = try await fetch(
-                "/api/v1/feed/timeline/",
-                method: "POST",
-                body: "reason=pagination&is_pull_to_refresh=0&max_id=\(encode(cursor))"
-            )
+            let json = try await run { try await $0.timeline(cursor: cursor) }
             let known = Set(feed.map(\.id))
             feed += Self.feedPosts(from: json).filter { !known.contains($0.id) }
             feedCursor = IGJSON.string(json["next_max_id"])
@@ -533,11 +512,7 @@ final class AppStore {
         defer { loadingStoryIDs.remove(tray.id) }
 
         do {
-            let json = try await fetch(
-                "/api/v1/feed/reels_media/",
-                method: "POST",
-                body: "reel_ids=\(encode(tray.id))"
-            )
+            let json = try await run { try await $0.reelsMedia(reelID: tray.id) }
             let slides = IGJSON.storySlides(from: json, reelID: tray.id)
             if !slides.isEmpty {
                 applyStorySlides(slides, for: tray.id)
@@ -578,7 +553,7 @@ final class AppStore {
         guard explorePhase != .loading else { return }
         explorePhase = .loading
         do {
-            let json = try await fetch("/api/v1/discover/web/explore_grid/")
+            let json = try await run { try await $0.exploreGrid() }
             explore = IGJSON.collectPosts(in: json)
             explorePhase = .loaded
         } catch {
@@ -590,7 +565,7 @@ final class AppStore {
         guard reelsPhase != .loading else { return }
         reelsPhase = .loading
         do {
-            let json = try await fetch("/api/v1/clips/discover/", method: "POST", body: "page_size=8&include_feed_video=true")
+            let json = try await run { try await $0.clipsDiscover() }
             reels = IGJSON.collectPosts(in: json).filter(\.isVideo)
             reelsCursor = Self.reelsCursor(json)
             reelsPhase = .loaded
@@ -604,11 +579,7 @@ final class AppStore {
         isLoadingMoreReels = true
         defer { isLoadingMoreReels = false }
         do {
-            let json = try await fetch(
-                "/api/v1/clips/discover/",
-                method: "POST",
-                body: "page_size=8&include_feed_video=true&max_id=\(encode(cursor))"
-            )
+            let json = try await run { try await $0.clipsDiscover(cursor: cursor) }
             let known = Set(reels.map(\.id))
             reels += IGJSON.collectPosts(in: json).filter { $0.isVideo && !known.contains($0.id) }
             reelsCursor = Self.reelsCursor(json)
@@ -631,7 +602,7 @@ final class AppStore {
 
     /// Instagram's blended search: accounts first, then hashtags.
     func search(_ query: String) async -> SearchResults {
-        guard let json = try? await fetch("/api/v1/web/search/topsearch/?context=blended&query=\(encode(query))&include_reel=true") else {
+        guard let json = try? await run({ try await $0.topSearch(query: query) }) else {
             return SearchResults()
         }
         let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap { ($0["user"] as? [String: Any]).flatMap(IGJSON.user) }
@@ -646,7 +617,7 @@ final class AppStore {
         guard activityPhase != .loading else { return }
         activityPhase = .loading
         do {
-            let json = try await fetch("/api/v1/news/inbox/")
+            let json = try await run { try await $0.newsInbox() }
             activity = IGJSON.activities(in: json)
             activityPhase = .loaded
         } catch {
@@ -751,20 +722,9 @@ final class AppStore {
     }
 
     /// Calls a `direct_v2/threads/broadcast/<kind>/` endpoint and returns its payload when Instagram answers `ok`.
-    /// Uses the client directly so that an unsupported endpoint can never sign the user out.
+    /// Uses the transport directly so that an unsupported endpoint can never sign the user out.
     func broadcast(kind: String, fields: [String: String]) async -> [String: Any]? {
-        let token = String((0..<19).map { _ in "0123456789".randomElement()! })
-        var parameters = fields
-        parameters["action"] = parameters["action"] ?? "send_item"
-        parameters["client_context"] = token
-        parameters["mutation_token"] = token
-        parameters["offline_threading_id"] = token
-        let body = parameters.map { "\($0.key)=\(encode($0.value))" }.joined(separator: "&")
-        guard let response = try? await client.request("/api/v1/direct_v2/threads/broadcast/\(kind)/", method: "POST", body: body),
-              (200..<300).contains(response.status),
-              let json = response.json,
-              (json["status"] as? String) == "ok" else { return nil }
-        return json
+        await api.broadcast(kind: kind, fields: fields)
     }
 
     private func setDelivery(_ delivery: IGDirectMessage.Delivery, for messageID: String, in threadID: String) {
@@ -875,7 +835,7 @@ final class AppStore {
 
     /// Forgets the Instagram session on this Mac and returns to the sign-in screen.
     func signOut() async {
-        _ = try? await client.request("/api/v1/web/accounts/logout/ajax/", method: "POST", body: "one_tap_app_login=0")
+        await api.logout()
         let store = WKWebsiteDataStore.default()
         let records = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
         await store.removeData(
@@ -890,9 +850,7 @@ final class AppStore {
     }
 
     func setAccountPrivate(_ makePrivate: Bool) async -> Bool {
-        guard let response = try? await client.request(
-            "/api/v1/accounts/\(makePrivate ? "set_private" : "set_public")/", method: "POST", body: ""
-        ), (200..<300).contains(response.status) else { return false }
+        guard await api.setPrivacy(isPrivate: makePrivate) else { return false }
         updateProfile(viewerID ?? "") { $0.isPrivate = makePrivate }
         return true
     }
@@ -930,14 +888,8 @@ final class AppStore {
     func createNote(text: String, closeFriends: Bool) async -> Bool {
         let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
         guard !trimmed.isEmpty,
-              let response = try? await client.request(
-                  "/api/v1/notes/create_note/",
-                  method: "POST",
-                  body: "note_style=0&text=\(encode(trimmed))&audience=\(closeFriends ? 1 : 0)"
-              ),
-              (200..<300).contains(response.status),
-              (response.json?["status"] as? String) == "ok" else { return false }
-        let noteDict = response.json?["note"] as? [String: Any]
+              let json = await api.createNote(text: trimmed, closeFriends: closeFriends) else { return false }
+        let noteDict = json["note"] as? [String: Any]
         if let me = viewer {
             let note = IGNote(
                 id: "own-\(UUID().uuidString)",
@@ -955,8 +907,7 @@ final class AppStore {
 
     func deleteOwnNote() async -> Bool {
         guard let note = ownNote, let noteID = note.noteID,
-              let response = try? await client.request("/api/v1/notes/delete_note/", method: "POST", body: "id=\(encode(noteID))"),
-              (200..<300).contains(response.status) else { return false }
+              await api.deleteNote(id: noteID) else { return false }
         withAnimation(.snappy) { notes.removeAll { $0.id == note.id } }
         return true
     }
@@ -1014,9 +965,8 @@ final class AppStore {
     /// from the page, or from any loaded tray, note or post of the viewer's.
     private func resolveViewerUsername() async -> String? {
         if let viewerUsername { return viewerUsername }
-        if let response = try? await client.request("/api/v1/accounts/current_user/?edit=true"),
-           (200..<300).contains(response.status),
-           let name = (response.json?["user"] as? [String: Any])?["username"] as? String, !name.isEmpty {
+        if let json = await api.currentUser(),
+           let name = (json["user"] as? [String: Any])?["username"] as? String, !name.isEmpty {
             viewerUsername = name
             return name
         }
@@ -1140,11 +1090,7 @@ final class AppStore {
         }
         Task {
             do {
-                let json = try await fetch(
-                    "/api/v1/friendships/\(target ? "create" : "destroy")/\(user.id)/",
-                    method: "POST",
-                    body: "container_module=profile&user_id=\(encode(user.id))"
-                )
+                let json = try await run { try await $0.setFollowing(userID: user.id, follow: target) }
                 if let status = json["friendship_status"] as? [String: Any] {
                     updateProfile(user.id) {
                         $0.isFollowing = IGJSON.bool(status["following"]) ?? $0.isFollowing
@@ -1170,10 +1116,7 @@ final class AppStore {
 
     /// Followers or following of a user, one page at a time.
     func loadFollowList(userID: String, kind: FollowListKind, cursor: String?) async throws -> ([IGUser], String?) {
-        var path = "/api/v1/friendships/\(userID)/\(kind.rawValue)/?count=24"
-        if kind == .followers { path += "&search_surface=follow_list_page" }
-        if let cursor { path += "&max_id=\(encode(cursor))" }
-        let json = try await fetch(path)
+        let json = try await run { try await $0.friendshipList(userID: userID, kind: kind, cursor: cursor) }
         let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap(IGJSON.user)
         return (users, IGJSON.string(json["next_max_id"]))
     }
@@ -1189,7 +1132,7 @@ final class AppStore {
     }
 
     func loadComments(for postID: String) async throws -> [IGComment] {
-        let json = try await fetch("/api/v1/media/\(postID)/comments/?can_support_threading=true&permalink_enabled=false")
+        let json = try await run { try await $0.comments(postID: postID) }
         return ((json["comments"] as? [[String: Any]]) ?? []).compactMap(IGJSON.comment)
     }
 
@@ -1223,7 +1166,7 @@ final class AppStore {
         mutate(post.id) { $0.hasLiked = target; $0.likeCount += target ? 1 : -1 }
         Task {
             do {
-                _ = try await fetch("/api/v1/web/likes/\(post.id)/\(target ? "like" : "unlike")/", method: "POST", body: "")
+                try await run { try await $0.setLiked(postID: post.id, liked: target) }
             } catch {
                 mutate(post.id) { $0.hasLiked = !target; $0.likeCount += target ? -1 : 1 }
             }
@@ -1236,7 +1179,7 @@ final class AppStore {
         mutate(post.id) { $0.hasSaved = target }
         Task {
             do {
-                _ = try await fetch("/api/v1/web/save/\(post.id)/\(target ? "save" : "unsave")/", method: "POST", body: "")
+                try await run { try await $0.setSaved(postID: post.id, saved: target) }
             } catch {
                 mutate(post.id) { $0.hasSaved = !target }
             }
@@ -1244,11 +1187,7 @@ final class AppStore {
     }
 
     func addComment(to postID: String, text: String) async throws -> IGComment? {
-        let json = try await fetch(
-            "/api/v1/web/comments/\(postID)/add/",
-            method: "POST",
-            body: "comment_text=\(encode(text))"
-        )
+        let json = try await run { try await $0.addComment(postID: postID, text: text) }
         mutate(postID) { $0.commentCount += 1 }
         return IGJSON.comment(json)
     }
