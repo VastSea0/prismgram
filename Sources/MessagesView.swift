@@ -759,7 +759,7 @@ private struct MessageRow: View {
     @State private var showsReactions = false
 
     private var outgoing: Bool { message.isFromViewer }
-    private var isEmojiOnly: Bool { message.media == nil && message.share == nil && message.text.isBigEmoji }
+    private var isEmojiOnly: Bool { message.text.isBigEmoji }
     private var canAct: Bool { message.delivery == .sent && !message.id.hasPrefix("local-") }
 
     var body: some View {
@@ -850,6 +850,8 @@ private struct MessageRow: View {
         VStack(alignment: outgoing ? .trailing : .leading, spacing: 3) {
             switch message.kind {
             case .reel, .post, .story:
+                ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
+            case .storyReply where message.media != nil || message.share != nil:
                 ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
             case .link where message.share != nil:
                 ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
@@ -1059,7 +1061,7 @@ private struct ShareCard: View {
 
     private var ratio: Double {
         switch message.kind {
-        case .reel, .story: return 9.0 / 16.0
+        case .reel, .story, .storyReply: return 9.0 / 16.0
         default: return min(max(message.media?.aspectRatio ?? 1, 0.8), 1.25)
         }
     }

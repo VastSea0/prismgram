@@ -675,11 +675,13 @@ enum IGJSON {
         if let slideMessages = dict["slide_messages"] as? [String: Any],
            let edges = slideMessages["edges"] as? [[String: Any]] {
             for edge in edges {
-                guard let node = edge["node"] as? [String: Any],
-                      let message = directMessage(node, viewerFBID: viewerFBID, viewerID: viewerID, fallbackMs: lastMs) else { continue }
+                guard let node = edge["node"] as? [String: Any] else { continue }
+                if latestSnippet.isEmpty, let snippet = node["igd_snippet"] as? String, !snippet.isEmpty {
+                    latestSnippet = snippet
+                }
+                guard let message = directMessage(node, viewerFBID: viewerFBID, viewerID: viewerID, fallbackMs: lastMs) else { continue }
                 if latestSnippet.isEmpty {
-                    latestSnippet = (node["igd_snippet"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-                        ?? (message.text.isEmpty ? message.kind.label : message.text)
+                    latestSnippet = message.text.isEmpty ? message.kind.label : message.text
                 }
                 messages.append(message)
             }
@@ -723,15 +725,29 @@ enum IGJSON {
         if let found { return found }
 
         // Shares and attachments that are not media objects still carry a preview image URL.
-        var preview: (URL, Double)?
+        var preview: (image: URL, video: URL?, ratio: Double)?
         func scan(_ value: Any, depth: Int) {
             guard preview == nil, depth < 9 else { return }
             if let dict = value as? [String: Any] {
+                let typename = ((dict["__typename"] as? String) ?? "").lowercased()
+                let isVideoAttachment = typename.contains("video")
+                if let cdnPreview = (dict["preview_cdn_url"] as? String).flatMap(URL.init(string:))
+                    ?? (dict["attachment_cdn_url"] as? String).flatMap(URL.init(string:)),
+                   isMediaCDN(cdnPreview) || isVideoAttachment {
+                    let rawAttachmentURL = (dict["attachment_cdn_url"] as? String).flatMap(URL.init(string:))
+                    let videoURL = isVideoAttachment ? rawAttachmentURL : nil
+                    let imageURL = isMediaCDN(cdnPreview) ? cdnPreview : ((dict["preview_cdn_url"] as? String).flatMap(URL.init(string:)) ?? cdnPreview)
+                    let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
+                    let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
+                    let ratio = width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1
+                    preview = (imageURL, videoURL, ratio)
+                    return
+                }
                 for key in ["preview_url", "image_url", "preview_image_url", "uri", "url"] {
                     if let text = dict[key] as? String, let link = URL(string: text), isMediaCDN(link) {
                         let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
                         let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
-                        preview = (link, width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1)
+                        preview = (link, nil, width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1)
                         return
                     }
                 }
@@ -743,7 +759,9 @@ enum IGJSON {
             }
         }
         scan(node, depth: 0)
-        return preview.map { IGMediaItem(id: $0.0.absoluteString, thumbURL: $0.0, imageURL: $0.0, videoURL: nil, aspectRatio: $0.1) }
+        return preview.map {
+            IGMediaItem(id: $0.image.absoluteString, thumbURL: $0.image, imageURL: $0.image, videoURL: $0.video, aspectRatio: $0.ratio)
+        }
     }
 
     static let skippedAttachmentKeys: Set<String> = ["sender", "replied_to_message", "user_dict", "profile_pic_url", "reactions"]
@@ -758,7 +776,7 @@ enum IGJSON {
     static func describeContentType(_ type: String) -> String {
         let lower = type.lowercased()
         if lower.contains("reel") || lower.contains("clip") { return "Bir Reels videosu paylaştı" }
-        if lower.contains("story") { return "Bir hikaye paylaştı" }
+        if lower.contains("story") || lower.contains("montage") { return "Bir hikaye paylaştı" }
         if lower.contains("media") || lower.contains("photo") || lower.contains("image") { return "Bir medya gönderdi" }
         if lower.contains("voice") || lower.contains("audio") { return "Sesli mesaj" }
         if lower.contains("like") || lower.contains("reaction") { return "❤️" }

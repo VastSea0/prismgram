@@ -10,6 +10,17 @@ import Foundation
 
 extension IGJSON {
     static func directMessage(_ node: [String: Any], viewerFBID: String, viewerID: String, fallbackMs: Double) -> IGDirectMessage? {
+        let contentType = (node["content_type"] as? String) ?? ""
+        let content = node["content"] as? [String: Any]
+        let contentTypename = (content?["__typename"] as? String) ?? ""
+        // Reaction action logs are administrative rows ("Mesajına 🤍 ifadesini bıraktı"); the reaction itself
+        // is already attached to the target message's `reactions` array.
+        if contentType == "REACTION_LOG_XMAT"
+            || contentTypename == "SlideMessageAdminText"
+            || bool(content?["is_reaction_action_log"]) == true {
+            return nil
+        }
+
         let id = string(node["message_id"]) ?? string(node["id"]) ?? UUID().uuidString
         let sender = node["sender"] as? [String: Any]
         let senderDict = sender?["user_dict"] as? [String: Any]
@@ -17,15 +28,13 @@ extension IGJSON {
             ?? string(senderDict?["interop_messaging_user_fbid"])
             ?? string(sender?["id"])
             ?? ""
-        let content = node["content"] as? [String: Any]
         let textBody = (node["text_body"] as? String) ?? (content?["text_body"] as? String) ?? ""
         let snippet = (node["igd_snippet"] as? String) ?? ""
-        let contentType = (node["content_type"] as? String) ?? ""
 
         let media = attachment(in: node)
         let signature = ([contentType] + typeNames(in: content ?? node, depth: 0)).joined(separator: " ").lowercased()
         let kind = messageKind(signature: signature, media: media, text: textBody)
-        let share = [.reel, .post, .story, .link].contains(kind) ? sharePreview(in: node) : nil
+        let share = [.reel, .post, .story, .storyReply, .link].contains(kind) ? sharePreview(in: node) : nil
 
         var text = textBody
         if text.isEmpty && media == nil && share == nil {
@@ -57,7 +66,9 @@ extension IGJSON {
     }
 
     private static func messageKind(signature s: String, media: IGMediaItem?, text: String) -> IGDirectMessage.Kind {
-        if s.contains("story") { return s.contains("reply") || s.contains("reaction") || s.contains("mention") ? .storyReply : .story }
+        if s.contains("story") || s.contains("montage") {
+            return (!text.isEmpty || s.contains("reply") || s.contains("reaction") || s.contains("mention") || s.contains("expired")) ? .storyReply : .story
+        }
         if s.contains("clip") || s.contains("reel") { return .reel }
         if s.contains("media_share") || s.contains("mediashare") || s.contains("feed_post") || s.contains("post_share") { return .post }
         if s.contains("voice") || s.contains("audio") { return .voice }
@@ -71,7 +82,13 @@ extension IGJSON {
     private static func typeNames(in value: Any, depth: Int) -> [String] {
         guard depth < 4 else { return [] }
         if let dict = value as? [String: Any] {
-            var names = [dict["__typename"], dict["xma_type"], dict["attachment_type"], dict["content_type"]].compactMap { $0 as? String }
+            var names = [
+                dict["__typename"],
+                dict["xma_type"],
+                dict["attachment_type"],
+                dict["content_type"],
+                dict["preview_image_decoration_type"]
+            ].compactMap { $0 as? String }
             for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
                 names += typeNames(in: child, depth: depth + 1)
             }
@@ -84,6 +101,7 @@ extension IGJSON {
     /// Owner, caption and link of a shared reel, post or story.
     private static func sharePreview(in node: [String: Any]) -> IGDirectMessage.SharePreview? {
         var preview = IGDirectMessage.SharePreview()
+        var isExpiredPlaceholder = false
         func first(_ keys: [String], in dict: [String: Any]) -> String? {
             for key in keys { if let text = dict[key] as? String, !text.isEmpty { return text } }
             return nil
@@ -91,14 +109,21 @@ extension IGJSON {
         func walk(_ value: Any, depth: Int) {
             guard depth < 9 else { return }
             if let dict = value as? [String: Any] {
+                if (dict["__typename"] as? String) == "SlideMessageExpiredPlaceholderXMA" {
+                    isExpiredPlaceholder = true
+                }
                 preview.title = preview.title ?? first(["header_title_text", "title_text", "xma_title", "username"], in: dict)
-                preview.subtitle = preview.subtitle ?? first(["subtitle_text", "caption_body_text", "xma_subtitle", "caption_text"], in: dict)
+                preview.subtitle = preview.subtitle ?? first(["subtitle_text", "caption_body_text", "xma_subtitle", "caption_text", "eyebrow_text"], in: dict)
                     ?? ((dict["caption"] as? [String: Any])?["text"] as? String)
                 if preview.url == nil, let link = first(["target_url", "xma_target_url", "cta_url", "permalink"], in: dict) {
                     preview.url = URL(string: link)
                 }
-                if preview.avatarURL == nil, let avatar = first(["header_icon_url", "profile_pic_url"], in: dict) {
-                    preview.avatarURL = URL(string: avatar)
+                if preview.avatarURL == nil {
+                    let avatar = first(["header_icon_url", "profile_pic_url"], in: dict)
+                        ?? ((dict["header_icon"] as? [String: Any])?["url"] as? String)
+                    if let avatar, !avatar.isEmpty {
+                        preview.avatarURL = URL(string: avatar)
+                    }
                 }
                 for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
                     walk(child, depth: depth + 1)
@@ -108,18 +133,29 @@ extension IGJSON {
             }
         }
         walk(node, depth: 0)
+        if isExpiredPlaceholder && preview.title == nil && preview.subtitle == nil {
+            preview.subtitle = "Hikaye artık kullanılamıyor"
+        }
         return preview.title == nil && preview.url == nil && preview.subtitle == nil ? nil : preview
     }
 
     private static func replyQuote(_ dict: [String: Any]?, viewerFBID: String, viewerID: String) -> IGDirectMessage.ReplyQuote? {
         guard let dict else { return nil }
         let content = dict["content"] as? [String: Any]
-        let text = (dict["text_body"] as? String) ?? (content?["text_body"] as? String) ?? (dict["igd_snippet"] as? String) ?? ""
+        let rawText = (dict["text_body"] as? String) ?? (content?["text_body"] as? String) ?? (dict["igd_snippet"] as? String) ?? ""
+        let fallbackDescription: String = {
+            if let share = sharePreview(in: dict), let title = share.title ?? share.subtitle, !title.isEmpty {
+                return title
+            }
+            let described = describeContentType((dict["content_type"] as? String) ?? "")
+            return described.isEmpty ? "Ek" : described
+        }()
+        let text = rawText.isEmpty ? fallbackDescription : rawText
         let sender = dict["sender"] as? [String: Any]
         let senderDict = sender?["user_dict"] as? [String: Any]
         let fbid = string(dict["sender_fbid"]) ?? string(senderDict?["interop_messaging_user_fbid"]) ?? string(sender?["id"]) ?? ""
         return IGDirectMessage.ReplyQuote(
-            text: text.isEmpty ? "Ek" : text,
+            text: text,
             senderUsername: senderDict?["username"] as? String,
             isFromViewer: !fbid.isEmpty && (fbid == viewerFBID || fbid == viewerID)
         )
