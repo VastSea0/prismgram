@@ -60,6 +60,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
+                Text("Helo!")
             }
             Button("Instagram ile Giriş Yap") { store.isShowingLogin = true }
                 .buttonStyle(.glassProminent)
@@ -208,19 +209,20 @@ struct ContentView: View {
     }
 }
 
-/// The phone layout's bottom tab bar, using macOS 26's native `NSGlassEffectView` + `NSSegmentedControl`
-/// capsule so pressing or dragging across tabs gets the same refractive Liquid Glass droplet lens as the
-/// toolbar's segmented layout picker.
+/// The phone layout's bottom tab bar, configured with the exact same toolbar platter glass and
+/// navigation-tab morphology as the top toolbar's segmented layout `Picker`.
 struct PhoneTabBar: View {
     @Bindable var store: AppStore
     var unreadCount: Int = 0
+
+    private let barWidth: CGFloat = CGFloat(InstagramTab.allCases.count) * 42
 
     var body: some View {
         LiquidGlassSegmentedTabBar(
             selectedTab: store.tab,
             onSelect: { store.select($0) }
         )
-        .frame(height: 36)
+        .frame(width: barWidth, height: 36)
         .overlay {
             if unreadCount > 0, let directIndex = InstagramTab.allCases.firstIndex(of: .direct) {
                 GeometryReader { geo in
@@ -241,6 +243,33 @@ struct PhoneTabBar: View {
     }
 }
 
+/// Subclass of `NSSegmentedControl` that opts into the exact toolbar semantic context and
+/// centered-toolbar-item glass metrics that `NSToolbar` provides to a principal `.segmented` `Picker`.
+private final class ToolbarStyleSegmentedControl: NSSegmentedControl {
+    private static let installToolbarMetrics: Void = {
+        let cls = ToolbarStyleSegmentedControl.self
+        let trueBlock: @convention(block) (AnyObject) -> Bool = { _ in true }
+        class_addMethod(cls, Selector(("_inToolbar")), imp_implementationWithBlock(trueBlock), "B@:")
+        class_addMethod(cls, Selector(("computed_effectiveInCenteredToolbarItem")), imp_implementationWithBlock(trueBlock), "B@:")
+        let glassOptsBlock: @convention(block) (AnyObject) -> UInt8 = { _ in 3 }
+        class_addMethod(cls, Selector(("computed_glassContextOptions")), imp_implementationWithBlock(glassOptsBlock), "C@:")
+        let semCtxBlock: @convention(block) (AnyObject) -> Int = { _ in 4 }
+        class_addMethod(cls, Selector(("computed_effectiveSemanticContext")), imp_implementationWithBlock(semCtxBlock), "q@:")
+        let metricsBlock: @convention(block) (AnyObject) -> Int = { _ in 1 }
+        class_addMethod(cls, Selector(("computed_effectiveControlMetricsBehavior")), imp_implementationWithBlock(metricsBlock), "q@:")
+    }()
+
+    override init(frame frameRect: NSRect) {
+        _ = Self.installToolbarMetrics
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) {
+        _ = Self.installToolbarMetrics
+        super.init(coder: coder)
+    }
+}
+
 private struct LiquidGlassSegmentedTabBar: NSViewRepresentable {
     let selectedTab: InstagramTab
     let onSelect: (InstagramTab) -> Void
@@ -252,14 +281,16 @@ private struct LiquidGlassSegmentedTabBar: NSViewRepresentable {
     func makeNSView(context: Context) -> NSGlassEffectView {
         let glass = NSGlassEffectView()
         glass.style = .regular
+        glass.cornerRadius = 18
+        glass.setValue(0, forKey: "_variant")
+        glass.setValue(true, forKey: "effectIsInteractive")
 
         let tabs = InstagramTab.allCases
-        let control = NSSegmentedControl()
+        let control = ToolbarStyleSegmentedControl(frame: .zero)
         control.segmentCount = tabs.count
         control.trackingMode = .selectOne
         control.segmentStyle = .automatic
         control.controlSize = .extraLarge
-        control.borderShape = .capsule
         control.segmentDistribution = .fillEqually
         control.target = context.coordinator
         control.action = #selector(Coordinator.segmentChanged(_:))
@@ -284,9 +315,7 @@ private struct LiquidGlassSegmentedTabBar: NSViewRepresentable {
         for (index, tab) in tabs.enumerated() {
             let isSelected = (tab == selected)
             let symbol = isSelected ? tab.filledSymbolName : tab.symbolName
-            let config = NSImage.SymbolConfiguration(pointSize: 15.5, weight: isSelected ? .semibold : .regular)
-            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tab.title)?
-                .withSymbolConfiguration(config)
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tab.title)
             control.setImage(image, forSegment: index)
             if isSelected && control.selectedSegment != index {
                 control.selectedSegment = index
