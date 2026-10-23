@@ -513,12 +513,11 @@ struct PostView: View {
                 }
 
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+                    store.sharePost = post
                 } label: {
                     Image(systemName: "paperplane")
                 }
-                .help("Bağlantıyı kopyala")
+                .help("Gönderiyi paylaş")
 
                 Spacer()
 
@@ -997,9 +996,7 @@ struct ReelPage: View {
             .symbolEffect(.bounce, value: reel.hasLiked)
             actionButton("bubble.right", count: reel.commentCount, light: light) { store.detailPost = reel }
             actionButton("paperplane", count: nil, light: light) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString("https://www.instagram.com/reel/\(reel.code)/", forType: .string)
-                flash("link")
+                store.sharePost = reel
             }
             actionButton(reel.hasSaved ? "bookmark.fill" : "bookmark", count: nil, light: light) {
                 withAnimation(.spring(duration: 0.28, bounce: 0.4)) { store.toggleSave(reel) }

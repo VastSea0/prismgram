@@ -8,7 +8,7 @@ import Foundation
 /// Web Inspector (the view is inspectable) and call e.g. `await __prismgram.currentPath()`.
 enum BridgeScripts {
     /// Bump when the bridge's methods or results change shape.
-    static let version = 5
+    static let version = 6
 
     /// Installs `window.__prismgram` unless it already exists. Injected at document start and
     /// prepended to calls (see `InstagramClient.callBridge`) in case the page replaced its window.
@@ -132,6 +132,68 @@ enum BridgeScripts {
                     options.body = body;
                 }
                 const response = await fetch(path, options);
+                return JSON.stringify({ status: response.status, body: await response.text() });
+            },
+
+            /// Performs a like, unlike, save or unsave Relay mutation on a media item using Instagram Web's
+            /// own PolarisAPI modules or `/graphql/query` fallback.
+            async mutateMedia(action, postID, appID, asbd) {
+                const cleanID = String(postID).split('_')[0];
+                const specs = {
+                    like:   { mod: 'PolarisAPILikePost',   fn: 'likePost',   op: 'PolarisAPILikePostMutation',   doc: '28051398997871885' },
+                    unlike: { mod: 'PolarisAPIUnlikePost', fn: 'unlikePost', op: 'PolarisAPIUnlikePostMutation', doc: '29100661379564082' },
+                    save:   { mod: 'PolarisAPISavePost',   fn: 'savePost',   op: 'PolarisAPISavePostMutation',   doc: '27326721586982367' },
+                    unsave: { mod: 'PolarisAPIUnsavePost', fn: 'unsavePost', op: 'PolarisAPIUnsavePostMutation', doc: '27203919972607144' }
+                };
+                const spec = specs[action];
+                if (!spec) {
+                    return JSON.stringify({ status: 400, body: JSON.stringify({ message: 'unknown action' }) });
+                }
+                if (typeof window.require === 'function') {
+                    try {
+                        const mod = window.require(spec.mod);
+                        if (mod && typeof mod[spec.fn] === 'function') {
+                            await mod[spec.fn](cleanID);
+                            return JSON.stringify({ status: 200, body: JSON.stringify({ status: 'ok', source: 'relay' }) });
+                        }
+                    } catch (_) {}
+                }
+                const config = this.config(appID, asbd);
+                const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+                const claim = sessionStorage.getItem('www-claim-v2') || '0';
+                let lsd = '';
+                if (typeof window.require === 'function') {
+                    try { lsd = window.require('LSD')?.token || ''; } catch (_) {}
+                }
+                if (!lsd) {
+                    const html = document.documentElement.innerHTML;
+                    const m = html.match(/"LSD",\[\],\{"token":"([^"]+)"\}/) || html.match(/"lsd":"([^"]+)"/);
+                    if (m) { lsd = m[1]; }
+                }
+                const headers = {
+                    'Accept': '*/*',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-IG-App-ID': config.appID,
+                    'X-ASBD-ID': config.asbd,
+                    'X-CSRFToken': csrf,
+                    'X-IG-WWW-Claim': claim,
+                    'X-FB-Friendly-Name': spec.op,
+                    'X-Instagram-AJAX': '1',
+                    'X-Requested-With': 'XMLHttpRequest'
+                };
+                if (lsd) { headers['X-FB-LSD'] = lsd; }
+                const params = new URLSearchParams({
+                    fb_api_req_friendly_name: spec.op,
+                    variables: JSON.stringify({ input: { media_id: cleanID } }),
+                    doc_id: spec.doc
+                });
+                if (lsd) { params.set('lsd', lsd); }
+                const response = await fetch('/graphql/query', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: headers,
+                    body: params.toString()
+                });
                 return JSON.stringify({ status: response.status, body: await response.text() });
             },
 

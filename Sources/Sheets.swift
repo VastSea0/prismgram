@@ -268,3 +268,138 @@ struct InstagramPageView: NSViewRepresentable {
         }
     }
 }
+
+// MARK: - Share post / reel to Direct or clipboard
+
+struct SharePostSheet: View {
+    let post: IGPost
+    @Bindable var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var searchText = ""
+    @State private var note = ""
+    @State private var sentThreadIDs: Set<String> = []
+    @State private var copiedLink = false
+
+    private var permalink: URL {
+        let kindPath = (post.isVideo && store.reels.contains(where: { $0.id == post.id })) ? "reel" : "p"
+        return URL(string: "https://www.instagram.com/\(kindPath)/\(post.code)/")!
+    }
+
+    private var filteredThreads: [IGDirectThread] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return store.directThreads }
+        return store.directThreads.filter { thread in
+            thread.title.lowercased().contains(q)
+                || thread.users.contains { $0.username.lowercased().contains(q) || $0.fullName.lowercased().contains(q) }
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    if let thumb = post.items.first?.thumbURL ?? post.items.first?.imageURL {
+                        RemoteImage(url: thumb, maxPixelSize: 160)
+                            .frame(width: 48, height: 48)
+                            .clipShape(.rect(cornerRadius: 8))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("@\(post.user.username)")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(post.caption.isEmpty ? "Instagram gönderisi" : post.caption)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+                        copiedLink = true
+                    } label: {
+                        Label(copiedLink ? "Kopyalandı" : "Bağlantıyı Kopyala", systemImage: copiedLink ? "checkmark" : "link")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.glass)
+                }
+                .padding(14)
+
+                Divider()
+
+                VStack(spacing: 8) {
+                    TextField("Kişi veya sohbet ara…", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Mesaj ekle (isteğe bağlı)…", text: $note)
+                        .textFieldStyle(.roundedBorder)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                Divider()
+
+                if store.directPhase == .loading && store.directThreads.isEmpty {
+                    ProgressView("Sohbetler yükleniyor…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if filteredThreads.isEmpty {
+                    ContentUnavailableView(
+                        searchText.isEmpty ? "Sohbet bulunamadı" : "Sonuç yok",
+                        systemImage: "paperplane"
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(filteredThreads) { thread in
+                        HStack(spacing: 12) {
+                            AvatarView(url: thread.users.first?.avatarURL, size: 38)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(thread.title)
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .lineLimit(1)
+                                if let username = thread.users.first?.username, !thread.isGroup {
+                                    Text("@\(username)")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            let isSent = sentThreadIDs.contains(thread.id)
+                            Button {
+                                sentThreadIDs.insert(thread.id)
+                                store.share(post, to: thread, note: note)
+                            } label: {
+                                Text(isSent ? "Gönderildi ✓" : "Gönder")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                            }
+                            .buttonStyle(.glassProminent)
+                            .disabled(isSent)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Gönderiyi Paylaş")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Kapat") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        NSWorkspace.shared.open(permalink)
+                    } label: {
+                        Label("Tarayıcıda Aç", systemImage: "safari")
+                    }
+                }
+            }
+        }
+        .frame(width: 420, height: 540)
+        .task {
+            if store.directThreads.isEmpty {
+                await store.loadDirect()
+            }
+        }
+        .onDisappear { store.sharePost = nil }
+    }
+}

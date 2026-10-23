@@ -11,6 +11,7 @@ protocol InstagramTransport: AnyObject {
     func setNetworkTap(pattern: String?)
     func detectViewerUsername() async -> String?
     func request(_ path: String, method: String, body: String?) async throws -> InstagramClient.Response
+    func mutateMedia(action: String, postID: String) async throws -> InstagramClient.Response
     func withPage<T>(_ purpose: String, _ body: () async throws -> T) async rethrows -> T
     @discardableResult func navigate(to path: String) async -> String?
     func scrollToBottom() async
@@ -300,6 +301,30 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
             throw ClientError.badEnvelope
         }
 
+        var bodyData: Data?
+        var json: [String: Any]?
+        if let bodyText = envelope["body"] as? String, let data = bodyText.data(using: .utf8) {
+            bodyData = data
+            json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        return Response(status: status, data: bodyData, json: json)
+    }
+
+    func mutateMedia(action: String, postID: String) async throws -> Response {
+        guard await waitUntilReady(timeout: Self.readinessTimeout) else { throw ClientError.notReady }
+        let arguments: [String: Any] = [
+            "action": action,
+            "postID": postID,
+            "appID": Self.appID,
+            "asbd": Self.asbdID
+        ]
+        let raw = try await callBridgeThrowing("mutateMedia(action, postID, appID, asbd)", arguments: arguments)
+        guard let text = raw as? String,
+              let envelopeData = text.data(using: .utf8),
+              let envelope = try JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
+              let status = envelope["status"] as? Int else {
+            throw ClientError.badEnvelope
+        }
         var bodyData: Data?
         var json: [String: Any]?
         if let bodyText = envelope["body"] as? String, let data = bodyText.data(using: .utf8) {

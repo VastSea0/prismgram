@@ -66,6 +66,7 @@ final class AppStore {
     private(set) var storyQueue: [IGStoryTray] = []
     private var loadingStoryIDs: Set<String> = []
     var detailPost: IGPost?
+    var sharePost: IGPost?
     var isShowingLogin = false
     var isShowingInstagramSettings = false
 
@@ -1224,6 +1225,17 @@ final class AppStore {
         let comment = try await run { try await $0.addComment(postID: postID, text: text) }
         mutate(postID) { $0.commentCount += 1 }
         return comment
+    }
+
+    func share(_ post: IGPost, to thread: IGDirectThread, note: String = "") {
+        let kindPath = (post.isVideo && reels.contains(where: { $0.id == post.id })) ? "reel" : "p"
+        let permalink = "https://www.instagram.com/\(kindPath)/\(post.code)/"
+        haptic(.levelChange)
+        sendDirectMessage(text: permalink, in: thread)
+        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedNote.isEmpty {
+            sendDirectMessage(text: trimmedNote, in: thread)
+        }
     }
 
     func markStorySeen(_ id: String) {

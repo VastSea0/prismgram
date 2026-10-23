@@ -168,11 +168,21 @@ struct InstagramAPI {
     }
 
     func setLiked(postID: String, liked: Bool) async throws {
-        _ = try await fetch("/api/v1/web/likes/\(postID)/\(liked ? "like" : "unlike")/", method: "POST", body: "")
+        let response = try await transport.mutateMedia(action: liked ? "like" : "unlike", postID: postID)
+        if response.status == 401 { throw Failure.unauthorized }
+        guard (200..<300).contains(response.status),
+              (response.json?["errors"] as? [Any])?.isEmpty != false else {
+            throw Failure.rejected("Beğeni işlemi tamamlanamadı (HTTP \(response.status)).")
+        }
     }
 
     func setSaved(postID: String, saved: Bool) async throws {
-        _ = try await fetch("/api/v1/web/save/\(postID)/\(saved ? "save" : "unsave")/", method: "POST", body: "")
+        let response = try await transport.mutateMedia(action: saved ? "save" : "unsave", postID: postID)
+        if response.status == 401 { throw Failure.unauthorized }
+        guard (200..<300).contains(response.status),
+              (response.json?["errors"] as? [Any])?.isEmpty != false else {
+            throw Failure.rejected("Kaydetme işlemi tamamlanamadı (HTTP \(response.status)).")
+        }
     }
 
     func addComment(postID: String, text: String) async throws -> IGComment? {
