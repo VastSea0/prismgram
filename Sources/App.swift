@@ -7,7 +7,7 @@ struct InstagramMacApp: App {
     @State private var store = AppStore()
 
     var body: some Scene {
-        Window("Prismgram", id: "main") {
+        WindowGroup("Prismgram", id: "main") {
             ContentView(store: store)
         }
         .commands {
@@ -62,9 +62,16 @@ struct InstagramMacApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApplication.shared.activate(ignoringOtherApps: true)
+        for window in NSApplication.shared.windows where window.alphaValue > 0 {
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -78,7 +78,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     let webView: WKWebView
     var onNetworkEvent: ((NetworkEvent) -> Void)?
 
-    private let hostWindow: NSWindow
+    private var hostWindow: NSWindow?
     private var isDocumentLoaded = false
     private var isAppBooted = false
     private var bootFallback: Task<Void, Never>?
@@ -112,7 +112,15 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
         view.isInspectable = true
         webView = view
 
-        // Offscreen host window so WebKit maintains full layout/JS execution without interfering with SwiftUI WindowGroup.
+        super.init()
+
+        view.navigationDelegate = self
+        controller.add(NetworkTapProxy(client: self), name: "igTap")
+        controller.add(NetworkTapProxy(client: self), name: "igReady")
+    }
+
+    private func ensureHostWindow() -> NSWindow {
+        if let existing = hostWindow { return existing }
         let offscreenFrame = NSRect(x: -16000, y: -16000, width: Self.engineSize.width, height: Self.engineSize.height)
         let window = NSWindow(contentRect: offscreenFrame, styleMask: [.borderless], backing: .buffered, defer: true)
         window.alphaValue = 0.0
@@ -122,14 +130,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
         window.isExcludedFromWindowsMenu = true
         window.canHide = false
         window.collectionBehavior = [.transient, .ignoresCycle, .stationary]
-        window.contentView = view
+        window.contentView = webView
         hostWindow = window
-
-        super.init()
-
-        view.navigationDelegate = self
-        controller.add(NetworkTapProxy(client: self), name: "igTap")
-        controller.add(NetworkTapProxy(client: self), name: "igReady")
+        return window
     }
 
     // MARK: Session
@@ -145,7 +148,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     }
 
     func prepare() async {
-        hostWindow.orderBack(nil)
+        ensureHostWindow().orderBack(nil)
         isDocumentLoaded = false
         isAppBooted = false
         if let url = URL(string: "https://www.instagram.com/") {
