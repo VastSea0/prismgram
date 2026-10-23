@@ -333,3 +333,57 @@ struct APITimelineResponse: Decodable {
 
     var nextCursor: String? { next_max_id?.value }
 }
+
+// MARK: - Comments (`/api/v1/media/<id>/comments/` & `/api/v1/web/comments/<id>/add/`)
+
+struct APIComment: Decodable {
+    let pk: FlexString?
+    let id: FlexString?
+    let text: String?
+    let user: APIUser?
+    let created_at: FlexDouble?
+    let comment_like_count: FlexInt?
+
+    var domainModel: IGComment? {
+        guard let resolvedID = (pk ?? id)?.value,
+              let text,
+              let author = user?.domainModel else { return nil }
+        return IGComment(
+            id: resolvedID,
+            user: author,
+            text: text,
+            createdAt: created_at.map { Date(timeIntervalSince1970: $0.value) } ?? .now,
+            likeCount: comment_like_count?.value ?? 0
+        )
+    }
+}
+
+struct APICommentsResponse: Decodable {
+    let comments: LossyArray<APIComment>?
+
+    var items: [IGComment] {
+        (comments?.elements ?? []).compactMap(\.domainModel)
+    }
+}
+
+struct APIAddCommentResponse: Decodable {
+    let comment: APIComment?
+    let pk: FlexString?
+    let id: FlexString?
+    let text: String?
+    let user: APIUser?
+    let created_at: FlexDouble?
+    let comment_like_count: FlexInt?
+
+    var createdComment: IGComment? {
+        if let wrapped = comment?.domainModel { return wrapped }
+        return APIComment(
+            pk: pk,
+            id: id,
+            text: text,
+            user: user,
+            created_at: created_at,
+            comment_like_count: comment_like_count
+        ).domainModel
+    }
+}

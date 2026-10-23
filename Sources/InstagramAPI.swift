@@ -141,8 +141,12 @@ struct InstagramAPI {
 
     // MARK: Media interactions
 
-    func comments(postID: String) async throws -> [String: Any] {
-        try await fetch("/api/v1/media/\(postID)/comments/?can_support_threading=true&permalink_enabled=false")
+    func comments(postID: String) async throws -> [IGComment] {
+        let decoded = try await fetchDecoded(
+            APICommentsResponse.self,
+            "/api/v1/media/\(postID)/comments/?can_support_threading=true&permalink_enabled=false"
+        )
+        return decoded.items
     }
 
     func setLiked(postID: String, liked: Bool) async throws {
@@ -153,12 +157,14 @@ struct InstagramAPI {
         _ = try await fetch("/api/v1/web/save/\(postID)/\(saved ? "save" : "unsave")/", method: "POST", body: "")
     }
 
-    func addComment(postID: String, text: String) async throws -> [String: Any] {
-        try await fetch(
+    func addComment(postID: String, text: String) async throws -> IGComment? {
+        let decoded = try await fetchDecoded(
+            APIAddCommentResponse.self,
             "/api/v1/web/comments/\(postID)/add/",
             method: "POST",
             body: "comment_text=\(Self.encode(text))"
         )
+        return decoded.createdComment
     }
 
     // MARK: Envelope handling

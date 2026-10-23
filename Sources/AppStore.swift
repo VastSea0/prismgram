@@ -1123,8 +1123,7 @@ final class AppStore {
     }
 
     func loadComments(for postID: String) async throws -> [IGComment] {
-        let json = try await run { try await $0.comments(postID: postID) }
-        return ((json["comments"] as? [[String: Any]]) ?? []).compactMap(IGJSON.comment)
+        try await run { try await $0.comments(postID: postID) }
     }
 
     // MARK: Actions
@@ -1178,9 +1177,9 @@ final class AppStore {
     }
 
     func addComment(to postID: String, text: String) async throws -> IGComment? {
-        let json = try await run { try await $0.addComment(postID: postID, text: text) }
+        let comment = try await run { try await $0.addComment(postID: postID, text: text) }
         mutate(postID) { $0.commentCount += 1 }
-        return IGJSON.comment(json)
+        return comment
     }
 
     func markStorySeen(_ id: String) {
