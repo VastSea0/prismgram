@@ -387,3 +387,68 @@ struct APIAddCommentResponse: Decodable {
         ).domainModel
     }
 }
+
+// MARK: - Recursive media tree (`explore_grid` & `clips/discover`)
+
+/// Decodes an arbitrary JSON tree and collects every media object in document order.
+///
+/// Explore and Reels wrap media inside varying layout containers (`sectional_items`, `layout_content`,
+/// `fill_items`, `two_by_two_item`, `items`, `media`). Decoding the tree through `Decodable` keeps
+/// individual media objects typed via `APIMedia` while remaining resilient to container reshaping.
+struct APIMediaTree: Decodable {
+    let posts: [IGPost]
+
+    private struct DynamicKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+
+    init(from decoder: Decoder) throws {
+        var collected: [IGPost] = []
+        var seen = Set<String>()
+        Self.walk(decoder: decoder, into: &collected, seen: &seen)
+        self.posts = collected
+    }
+
+    private static func walk(decoder: Decoder, into result: inout [IGPost], seen: inout Set<String>) {
+        if let keyed = try? decoder.container(keyedBy: DynamicKey.self) {
+            let hasCode = keyed.contains(DynamicKey(stringValue: "code")!)
+            let hasUser = keyed.contains(DynamicKey(stringValue: "user")!)
+            let hasMedia = keyed.contains(DynamicKey(stringValue: "image_versions2")!)
+                || keyed.contains(DynamicKey(stringValue: "video_versions")!)
+                || keyed.contains(DynamicKey(stringValue: "carousel_media")!)
+            if hasCode && hasUser && hasMedia,
+               let media = try? APIMedia(from: decoder),
+               !media.isSponsored,
+               let post = media.post {
+                if seen.insert(post.id).inserted {
+                    result.append(post)
+                }
+                return
+            }
+            for key in keyed.allKeys.sorted(by: { $0.stringValue < $1.stringValue }) {
+                if let childDecoder = try? keyed.superDecoder(forKey: key) {
+                    walk(decoder: childDecoder, into: &result, seen: &seen)
+                }
+            }
+        } else if var unkeyed = try? decoder.unkeyedContainer() {
+            while !unkeyed.isAtEnd {
+                if let childDecoder = try? unkeyed.superDecoder() {
+                    walk(decoder: childDecoder, into: &result, seen: &seen)
+                } else {
+                    break
+                }
+            }
+        }
+    }
+}
+
+struct APIExploreResponse: Decodable {
+    let posts: [IGPost]
+
+    init(from decoder: Decoder) throws {
+        self.posts = try APIMediaTree(from: decoder).posts
+    }
+}

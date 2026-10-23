@@ -34,8 +34,9 @@ struct InstagramAPI {
 
     // MARK: Explore, Reels, Search & Activity
 
-    func exploreGrid() async throws -> [String: Any] {
-        try await fetch("/api/v1/discover/web/explore_grid/")
+    func exploreGrid() async throws -> [IGPost] {
+        let decoded = try await fetchDecoded(APIExploreResponse.self, "/api/v1/discover/web/explore_grid/")
+        return decoded.posts
     }
 
     func clipsDiscover(cursor: String? = nil) async throws -> [String: Any] {

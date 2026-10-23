@@ -544,8 +544,7 @@ final class AppStore {
         guard explorePhase != .loading else { return }
         explorePhase = .loading
         do {
-            let json = try await run { try await $0.exploreGrid() }
-            explore = IGJSON.collectPosts(in: json)
+            explore = try await run { try await $0.exploreGrid() }
             explorePhase = .loaded
         } catch {
             explorePhase = .failed(message(for: error))
