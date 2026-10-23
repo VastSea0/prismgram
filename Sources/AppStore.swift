@@ -596,8 +596,7 @@ final class AppStore {
         guard activityPhase != .loading else { return }
         activityPhase = .loading
         do {
-            let json = try await run { try await $0.newsInbox() }
-            activity = IGJSON.activities(in: json)
+            activity = try await run { try await $0.newsInbox() }
             activityPhase = .loaded
         } catch {
             activityPhase = .failed(message(for: error))

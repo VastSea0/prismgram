@@ -509,3 +509,44 @@ struct APITopSearchResponse: Decodable {
         }
     }
 }
+
+// MARK: - Activity (`/api/v1/news/inbox/`)
+
+struct APINewsInboxResponse: Decodable {
+    let new_stories: LossyArray<StoryItem>?
+    let old_stories: LossyArray<StoryItem>?
+    let stories: LossyArray<StoryItem>?
+
+    struct StoryItem: Decodable {
+        let pk: FlexString?
+        let args: Args?
+    }
+
+    struct Args: Decodable {
+        let text: String?
+        let profile_image: String?
+        let timestamp: FlexDouble?
+        let media: LossyArray<MediaThumb>?
+    }
+
+    struct MediaThumb: Decodable {
+        let image: String?
+    }
+
+    var activities: [IGActivity] {
+        var raw = (new_stories?.elements ?? []) + (old_stories?.elements ?? [])
+        if raw.isEmpty { raw = stories?.elements ?? [] }
+        return raw.enumerated().compactMap { index, story in
+            guard let args = story.args,
+                  let text = args.text, !text.isEmpty else { return nil }
+            let thumb = args.media?.elements.first?.image
+            return IGActivity(
+                id: story.pk?.value ?? "\(index)-\(text.hashValue)",
+                text: text,
+                avatarURL: IGJSON.url(args.profile_image),
+                thumbURL: IGJSON.url(thumb),
+                date: args.timestamp.map { Date(timeIntervalSince1970: $0.value) }
+            )
+        }
+    }
+}

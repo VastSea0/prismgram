@@ -54,8 +54,9 @@ struct InstagramAPI {
         )
     }
 
-    func newsInbox() async throws -> [String: Any] {
-        try await fetch("/api/v1/news/inbox/")
+    func newsInbox() async throws -> [IGActivity] {
+        let decoded = try await fetchDecoded(APINewsInboxResponse.self, "/api/v1/news/inbox/")
+        return decoded.activities
     }
 
     // MARK: Direct & Notes
