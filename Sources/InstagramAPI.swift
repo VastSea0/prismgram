@@ -47,8 +47,11 @@ struct InstagramAPI {
         return try await fetchDecoded(APIClipsDiscoverResponse.self, "/api/v1/clips/discover/", method: "POST", body: body)
     }
 
-    func topSearch(query: String) async throws -> [String: Any] {
-        try await fetch("/api/v1/web/search/topsearch/?context=blended&query=\(Self.encode(query))&include_reel=true")
+    func topSearch(query: String) async throws -> APITopSearchResponse {
+        try await fetchDecoded(
+            APITopSearchResponse.self,
+            "/api/v1/web/search/topsearch/?context=blended&query=\(Self.encode(query))&include_reel=true"
+        )
     }
 
     func newsInbox() async throws -> [String: Any] {

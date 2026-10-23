@@ -586,15 +586,10 @@ final class AppStore {
 
     /// Instagram's blended search: accounts first, then hashtags.
     func search(_ query: String) async -> SearchResults {
-        guard let json = try? await run({ try await $0.topSearch(query: query) }) else {
+        guard let decoded = try? await run({ try await $0.topSearch(query: query) }) else {
             return SearchResults()
         }
-        let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap { ($0["user"] as? [String: Any]).flatMap(IGJSON.user) }
-        let hashtags = ((json["hashtags"] as? [[String: Any]]) ?? []).compactMap { entry -> SearchResults.Hashtag? in
-            guard let tag = entry["hashtag"] as? [String: Any], let name = tag["name"] as? String else { return nil }
-            return SearchResults.Hashtag(name: name, mediaCount: IGJSON.int(tag["media_count"]) ?? 0)
-        }
-        return SearchResults(users: users, hashtags: hashtags)
+        return SearchResults(users: decoded.parsedUsers, hashtags: decoded.parsedHashtags)
     }
 
     func loadActivity() async {

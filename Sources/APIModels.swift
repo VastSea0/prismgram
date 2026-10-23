@@ -478,3 +478,34 @@ struct APIClipsDiscoverResponse: Decodable {
         }
     }
 }
+
+// MARK: - Search (`/api/v1/web/search/topsearch/`)
+
+struct APITopSearchResponse: Decodable {
+    let users: LossyArray<UserEntry>?
+    let hashtags: LossyArray<HashtagEntry>?
+
+    struct UserEntry: Decodable {
+        let user: APIUser?
+    }
+
+    struct HashtagEntry: Decodable {
+        let hashtag: Hashtag?
+    }
+
+    struct Hashtag: Decodable {
+        let name: String
+        let media_count: FlexInt?
+    }
+
+    var parsedUsers: [IGUser] {
+        (users?.elements ?? []).compactMap { $0.user?.domainModel }
+    }
+
+    var parsedHashtags: [AppStore.SearchResults.Hashtag] {
+        (hashtags?.elements ?? []).compactMap { entry in
+            guard let tag = entry.hashtag, !tag.name.isEmpty else { return nil }
+            return AppStore.SearchResults.Hashtag(name: tag.name, mediaCount: tag.media_count?.value ?? 0)
+        }
+    }
+}
