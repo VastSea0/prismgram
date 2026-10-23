@@ -33,7 +33,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     /// How long after `didFinish` the boot signal may take before the loaded document is used anyway.
     private static let bootGracePeriod: Duration = .seconds(3)
 
+    /// Fallbacks only: the bridge prefers the values found in the page's own scripts (`__prismgram.config`).
     static let appID = "936619743392459"
+    static let asbdID = "129477"
     /// `PRISMGRAM_DEBUG=1` logs each request's path and HTTP status (never bodies) to standard error.
     static let isDebugging = ProcessInfo.processInfo.environment["PRISMGRAM_DEBUG"] != nil
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
@@ -152,6 +154,15 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         isAppBooted = true
         Self.debugLog("page booted at \(path) (page bridge v\(bridgeVersion), app bridge v\(BridgeScripts.version))")
         resumeWaitersIfReady()
+        if Self.isDebugging {
+            Task { @MainActor [weak self] in
+                let sources = await self?.callBridge(
+                    "config(appID, asbd).appIDSource + '/' + window.__prismgram.config(appID, asbd).asbdSource",
+                    arguments: ["appID": Self.appID, "asbd": Self.asbdID]
+                ) as? String
+                Self.debugLog("header constants (app id / asbd id) from: \(sources ?? "?")")
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -221,9 +232,10 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             "path": path,
             "method": method,
             "body": body ?? NSNull(),
-            "appID": Self.appID
+            "appID": Self.appID,
+            "asbd": Self.asbdID
         ]
-        let call = "request(path, method, body, appID)"
+        let call = "request(path, method, body, appID, asbd)"
         let raw: Any?
         do {
             raw = try await callBridgeThrowing(call, arguments: arguments)

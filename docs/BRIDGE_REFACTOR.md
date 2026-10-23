@@ -85,7 +85,7 @@ Do them in order; each depends on the previous ones.
 - [x] Add `window.__prismgram.version` and log it in debug mode.
 
 ### T4 — Read constants from the page
-- [ ] In the bridge, resolve `X-IG-App-ID` and `X-ASBD-ID` from the page (config/scripts,
+- [x] In the bridge, resolve `X-IG-App-ID` and `X-ASBD-ID` from the page (config/scripts,
       e.g. regex over inline scripts for `"APP_ID":"..."` / `asbd_id`), cache them, fall back to
       the current hard-coded values. Debug-log which source was used.
 
@@ -122,3 +122,4 @@ Append newest at the bottom: `YYYY-MM-DD HH:MM — <agent> — <task> — <what 
 - 2026-10-23 11:06 — Antigravity — T1 — `InstagramClient.withPage` (FIFO, non-reentrant) wraps story fallback, inbox, open/send/react/reply, profile open and section/scroll loads; stale profile tokens are rechecked after acquiring. Manual check: open a profile while a DM is sending; both should complete. NEXT: T2.
 - 2026-10-23 11:07 — Antigravity — T2 — Readiness = `didFinish` && `igReady` (`bootSignalScript`), with a 3 s grace fallback after `didFinish` so a changed markup never stalls requests; removed the blind 1.5 s sleep. Manual check: `PRISMGRAM_DEBUG=1` should print `page booted at /` on launch. NEXT: T3.
 - 2026-10-23 11:09 — Antigravity — T3 — All page JS moved to `BridgeScripts.swift` (`bridge`, `bootSignal`, `networkTap`); `InstagramClient` calls `window.__prismgram.*` via `callBridge`, which prepends the idempotent installer. Added `scripts/check-bridge-js.sh`. Page-reported bridge version is logged on boot. Manual check: in Web Inspector `await __prismgram.currentPath()` works. NEXT: T4.
+- 2026-10-23 11:10 — Antigravity — T4 — `__prismgram.config()` reads `"X-IG-App-ID"` / `"X-ASBD-ID"|"ASBD_ID"` from inline scripts (explicit keys only), caches per document, re-reads fallbacks after 30 s; Swift passes `appID`/`asbdID` as fallbacks and debug-logs the source after boot. Bridge v2. Manual check: `PRISMGRAM_DEBUG=1` prints `header constants ... from: page/...`; if it says fallback, nothing changes vs. before. NEXT: T5.

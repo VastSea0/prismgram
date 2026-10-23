@@ -8,7 +8,7 @@ import Foundation
 /// Web Inspector (the view is inspectable) and call e.g. `await __prismgram.currentPath()`.
 enum BridgeScripts {
     /// Bump when the bridge's methods or results change shape.
-    static let version = 1
+    static let version = 2
 
     /// Installs `window.__prismgram` unless it already exists. Injected at document start and
     /// prepended to calls (see `InstagramClient.callBridge`) in case the page replaced its window.
@@ -19,16 +19,52 @@ enum BridgeScripts {
 
         window.__prismgram = {
             version: __VERSION__,
+            _config: null,
+
+            /// Header values the web app itself uses, read from its inline scripts. Only explicitly named keys
+            /// are accepted (a generic "appId" could be another Meta app's id). Falls back to the values
+            /// passed in by native code; a fallback result is re-read after 30 s in case the page was early.
+            config(fallbackAppID, fallbackASBD) {
+                const cached = this._config;
+                if (cached && (cached.source === 'page' || Date.now() - cached.at < 30000)) { return cached; }
+                let appID = null, asbd = null;
+                try {
+                    const scripts = Array.from(document.querySelectorAll('script:not([src])'));
+                    for (const s of scripts) {
+                        const text = s.textContent || '';
+                        if (!appID) {
+                            const m = text.match(/"X-IG-App-ID"\s*:\s*"(\d{10,20})"/);
+                            if (m) { appID = m[1]; }
+                        }
+                        if (!asbd) {
+                            const m = text.match(/"(?:X-ASBD-ID|ASBD_ID)"\s*:\s*"?(\d{3,10})"?/);
+                            if (m) { asbd = m[1]; }
+                        }
+                        if (appID && asbd) { break; }
+                    }
+                } catch (_) {}
+                const result = {
+                    appID: appID || fallbackAppID,
+                    asbd: asbd || fallbackASBD,
+                    appIDSource: appID ? 'page' : 'fallback',
+                    asbdSource: asbd ? 'page' : 'fallback',
+                    source: (appID && asbd) ? 'page' : 'fallback',
+                    at: Date.now()
+                };
+                this._config = result;
+                return result;
+            },
 
             /// Calls an instagram.com endpoint as the web app would, with the session's own headers.
-            async request(path, method, body, appID) {
+            async request(path, method, body, appID, asbd) {
+                const config = this.config(appID, asbd);
                 const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
                 const claim = sessionStorage.getItem('www-claim-v2') || '0';
                 const headers = {
-                    'X-IG-App-ID': appID,
+                    'X-IG-App-ID': config.appID,
                     'X-CSRFToken': csrf,
                     'X-Requested-With': 'XMLHttpRequest',
-                    'X-ASBD-ID': '129477',
+                    'X-ASBD-ID': config.asbd,
                     'X-IG-WWW-Claim': claim,
                     'X-Instagram-AJAX': '1'
                 };
