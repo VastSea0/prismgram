@@ -8,7 +8,7 @@ import Foundation
 /// Web Inspector (the view is inspectable) and call e.g. `await __prismgram.currentPath()`.
 enum BridgeScripts {
     /// Bump when the bridge's methods or results change shape.
-    static let version = 2
+    static let version = 3
 
     /// Installs `window.__prismgram` unless it already exists. Injected at document start and
     /// prepended to calls (see `InstagramClient.callBridge`) in case the page replaced its window.
@@ -16,6 +16,64 @@ enum BridgeScripts {
     (function() {
         if (window.__prismgram && window.__prismgram.version === __VERSION__) { return; }
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const sendWords = new Set(['send', 'gönder', 'envoyer', 'enviar', 'senden', 'invia', 'отправить', 'إرسال', '发送', '送信', '보내기']);
+        const reactPattern = /react|emoji|tepki|ifade|réagir|reaccionar|reagieren|reagisci|реагир|تفاعل|表情|リアクション|공감/i;
+        const replyPattern = /reply|quote|yanıt|yanit|répondre|responder|antworten|rispondi|ответить|رد|回复|返信|답장/i;
+
+        function findComposer() {
+            const strategies = [
+                ['contenteditable-textbox', () => document.querySelector('div[role="main"] [contenteditable="true"][role="textbox"], [contenteditable="true"][role="textbox"]')],
+                ['main-textarea', () => document.querySelector('div[role="main"] textarea, textarea[placeholder]')],
+                ['any-contenteditable', () => document.querySelector('div[role="main"] [contenteditable="true"]')]
+            ];
+            for (const [name, fn] of strategies) {
+                const el = fn();
+                if (el) { return { el, strategy: name }; }
+            }
+            return null;
+        }
+
+        function findSendControl(box) {
+            const container = box.closest('form, [role="form"]')
+                || (box.parentElement && box.parentElement.parentElement && box.parentElement.parentElement.parentElement)
+                || document.querySelector('div[role="main"]')
+                || document.body;
+            const buttons = Array.from(container.querySelectorAll('button, div[role="button"]')).filter(b => !b.contains(box));
+
+            const submit = buttons.find(b => b.tagName === 'BUTTON' && (b.getAttribute('type') || '').toLowerCase() === 'submit');
+            if (submit) { return { el: submit, strategy: 'submit-type' }; }
+
+            const byLabel = buttons.find(b => {
+                const label = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
+                return sendWords.has(label);
+            });
+            if (byLabel) { return { el: byLabel, strategy: 'aria-or-text' }; }
+
+            const textOnly = buttons.filter(b => !b.querySelector('svg, img') && (b.innerText || '').trim().length > 0);
+            if (textOnly.length === 1) { return { el: textOnly[0], strategy: 'sole-text-button' }; }
+
+            return null;
+        }
+
+        function findActionControl(row, main, action) {
+            const scope = (row && row.querySelectorAll('[role="button"], button, [aria-label]').length) ? row : main;
+            const pattern = action === 'react' ? reactPattern : replyPattern;
+
+            const labelled = Array.from(scope.querySelectorAll('[aria-label]'))
+                .filter(e => pattern.test(e.getAttribute('aria-label') || ''));
+            const byLabel = labelled.map(e => e.closest('[role="button"], button') || e).pop();
+            if (byLabel) { return { el: byLabel, strategy: 'aria-label' }; }
+
+            if (row) {
+                const buttons = Array.from(row.querySelectorAll('[role="button"], button'))
+                    .filter(b => b.querySelector('svg'));
+                if (buttons.length >= 2) {
+                    const idx = action === 'react' ? 0 : 1;
+                    return { el: buttons[idx], strategy: 'row-icon-order' };
+                }
+            }
+            return null;
+        }
 
         window.__prismgram = {
             version: __VERSION__,
@@ -107,9 +165,11 @@ enum BridgeScripts {
 
             /// Where the page is and whether a message composer is on screen.
             threadState() {
+                const found = findComposer();
                 return JSON.stringify({
                     path: location.pathname,
-                    composer: !!document.querySelector('[contenteditable="true"][role="textbox"], div[role="main"] textarea')
+                    composer: !!found,
+                    strategy: found ? found.strategy : null
                 });
             },
 
@@ -132,11 +192,13 @@ enum BridgeScripts {
             },
 
             /// Types and sends a message, but only while the page shows `/direct/t/<expected>/`.
+            /// Returns `{ ok, step, strategy }` as JSON; never includes message text in diagnostic fields.
             async sendDirectMessage(text, expected) {
-                if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
-                const box = document.querySelector('[contenteditable="true"][role="textbox"]')
-                    || document.querySelector('div[role="main"] textarea');
-                if (!box) { return false; }
+                const out = (ok, step, strategy) => JSON.stringify({ ok, step, strategy: strategy || null });
+                if (!location.pathname.includes('/direct/t/' + expected)) { return out(false, 'thread-mismatch'); }
+                const found = findComposer();
+                if (!found) { return out(false, 'composer-not-found'); }
+                const box = found.el;
                 box.focus();
                 if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
                     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
@@ -148,53 +210,52 @@ enum BridgeScripts {
                     box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
                 }
                 await sleep(120);
-                if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
+                if (!location.pathname.includes('/direct/t/' + expected)) { return out(false, 'thread-changed-before-send', found.strategy); }
                 box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
                 await sleep(150);
                 const remaining = (box.innerText || box.value || '').trim();
                 if (remaining.length > 0) {
-                    const send = Array.from(document.querySelectorAll('div[role="button"], button')).find(b => {
-                        const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                        return t === 'send' || t === 'gönder';
-                    });
-                    if (!send) { return false; }
-                    send.click();
+                    const send = findSendControl(box);
+                    if (!send) { return out(false, 'send-button-not-found', found.strategy); }
+                    send.el.click();
+                    return out(true, 'sent', found.strategy + '+' + send.strategy);
                 }
-                return true;
+                return out(true, 'sent', found.strategy + '+enter');
             },
 
             /// Uses the page's hover controls to react to (`react`) or start a reply to (`reply`) the newest
             /// message with this text, in the thread the page verifiably shows.
+            /// Returns `{ ok, step, strategy }` as JSON; never includes message text in diagnostic fields.
             async messageAction(action, text, emoji, expected) {
-                if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
+                const out = (ok, step, strategy) => JSON.stringify({ ok, step, strategy: strategy || null });
+                if (!location.pathname.includes('/direct/t/' + expected)) { return out(false, 'thread-mismatch'); }
                 const main = document.querySelector('div[role="main"]') || document.body;
                 const exact = Array.from(main.querySelectorAll('div[dir="auto"], span[dir="auto"], div, span'))
                     .filter(e => (e.innerText || '').trim() === text);
                 const target = exact[exact.length - 1];
-                if (!target) { return false; }
+                if (!target) { return out(false, 'message-not-found'); }
                 const row = target.closest('div[role="row"], div[role="gridcell"]') || target.parentElement;
                 const fire = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
                 for (let el = target, i = 0; el && i < 8; el = el.parentElement, i++) {
                     ['pointerover', 'mouseover', 'pointerenter', 'mouseenter', 'pointermove', 'mousemove'].forEach(t => fire(el, t));
                 }
                 await sleep(400);
-                const pattern = action === 'react' ? /react|tepki|ifade/i : /reply|yanıt/i;
-                const scope = (row && row.querySelectorAll('[aria-label]').length) ? row : main;
-                const labelled = Array.from(scope.querySelectorAll('[aria-label]'))
-                    .filter(e => pattern.test(e.getAttribute('aria-label') || ''));
-                const button = labelled.map(e => e.closest('[role="button"], button') || e).pop();
-                if (!button) { return false; }
-                button.click();
-                if (action !== 'react') { return true; }
+                const found = findActionControl(row, main, action);
+                if (!found) { return out(false, action + '-button-not-found'); }
+                found.el.click();
+                if (action !== 'react') { return out(true, 'reply-started', found.strategy); }
                 await sleep(500);
                 const options = Array.from(document.querySelectorAll('[role="button"], button, [role="menuitem"], [role="option"]'));
                 const option = options.find(e => {
                     const label = (e.innerText || e.getAttribute('aria-label') || (e.querySelector('img') || {}).alt || '').trim();
                     return label.startsWith(emoji);
                 });
-                if (!option) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return false; }
+                if (!option) {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                    return out(false, 'emoji-option-not-found', found.strategy);
+                }
                 option.click();
-                return true;
+                return out(true, 'reacted', found.strategy);
             }
         };
     })();

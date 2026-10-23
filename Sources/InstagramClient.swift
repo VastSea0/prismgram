@@ -365,17 +365,38 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
     /// Types and sends a message in the hidden page, but only if it is still showing `/direct/t/<threadPathID>/`.
     func sendDirectMessage(text: String, threadPathID: String) async -> Bool {
-        let result = await callBridge("sendDirectMessage(text, expected)", arguments: ["text": text, "expected": threadPathID])
-        return (result as? Bool) ?? false
+        let raw = await callBridge("sendDirectMessage(text, expected)", arguments: ["text": text, "expected": threadPathID])
+        return Self.parseActionResult(raw, name: "sendDirectMessage")
     }
 
     /// Uses the hidden page's own hover controls to react to (`"react"`) or start a reply to (`"reply"`)
     /// the newest message with this text, in the thread the page is verifiably showing.
     func performMessageAction(_ action: String, messageText: String, emoji: String?, threadPathID: String) async -> Bool {
-        let result = await callBridge("messageAction(action, text, emoji, expected)", arguments: [
+        let raw = await callBridge("messageAction(action, text, emoji, expected)", arguments: [
             "action": action, "text": messageText, "emoji": emoji ?? "", "expected": threadPathID
         ])
-        return (result as? Bool) ?? false
+        return Self.parseActionResult(raw, name: "messageAction(\(action))")
+    }
+
+    /// Decodes a `{ ok, step, strategy }` JSON string returned by a DOM action and debug-logs how it went
+    /// (step and strategy only, never message text).
+    private static func parseActionResult(_ raw: Any?, name: String) -> Bool {
+        if let flag = raw as? Bool { return flag }
+        guard let text = raw as? String,
+              let data = text.data(using: .utf8),
+              let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ok = info["ok"] as? Bool else {
+            debugLog("\(name) failed: malformed result")
+            return false
+        }
+        let step = (info["step"] as? String) ?? "?"
+        let strategy = (info["strategy"] as? String) ?? "-"
+        if ok {
+            debugLog("\(name) ok (\(step) via \(strategy))")
+        } else {
+            debugLog("\(name) failed at \(step) (strategy \(strategy))")
+        }
+        return ok
     }
 
     /// Calls `window.__prismgram.<call>` in the page, (re)installing the bridge first if the page
