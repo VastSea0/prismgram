@@ -570,28 +570,82 @@ struct APINewsInboxResponse: Decodable {
 
     struct Args: Decodable {
         let text: String?
+        let profile_id: FlexString?
+        let profile_name: String?
         let profile_image: String?
         let timestamp: FlexDouble?
         let media: LossyArray<MediaThumb>?
+        let inline_follow: InlineFollow?
+        let links: LossyArray<LinkItem>?
     }
 
     struct MediaThumb: Decodable {
+        let id: FlexString?
         let image: String?
     }
 
+    struct InlineFollow: Decodable {
+        let user_info: APIUser?
+        let following: FlexBool?
+    }
+
+    struct LinkItem: Decodable {
+        let type: String?
+        let id: FlexString?
+        let start: FlexInt?
+        let end: FlexInt?
+    }
+
     var activities: [IGActivity] {
-        var raw = (new_stories?.elements ?? []) + (old_stories?.elements ?? [])
-        if raw.isEmpty { raw = stories?.elements ?? [] }
-        return raw.enumerated().compactMap { index, story in
+        let newList = (new_stories?.elements ?? []).map { ($0, true) }
+        let oldList = (old_stories?.elements ?? []).map { ($0, false) }
+        var raw = newList + oldList
+        if raw.isEmpty {
+            raw = (stories?.elements ?? []).map { ($0, false) }
+        }
+        return raw.enumerated().compactMap { index, entry in
+            let story = entry.0
             guard let args = story.args,
                   let text = args.text, !text.isEmpty else { return nil }
-            let thumb = args.media?.elements.first?.image
+            let firstMedia = args.media?.elements.first
+            let avatar = IGJSON.url(args.profile_image)
+            let userLinkUsername: String? = {
+                guard let link = args.links?.elements.first(where: { $0.type == "user" }),
+                      let s = link.start?.value, let e = link.end?.value,
+                      s >= 0, e > s, e <= text.count else { return nil }
+                let startIdx = text.index(text.startIndex, offsetBy: s)
+                let endIdx = text.index(text.startIndex, offsetBy: e)
+                return String(text[startIdx..<endIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }()
+            let actor: IGUser? = {
+                if var domain = args.inline_follow?.user_info?.domainModel {
+                    if let following = args.inline_follow?.following?.value {
+                        domain.isFollowing = following
+                    }
+                    return domain
+                }
+                let username = args.profile_name
+                    ?? userLinkUsername
+                    ?? text.split(separator: " ").first.map(String.init)
+                guard let username, !username.isEmpty else { return nil }
+                return IGUser(
+                    id: args.profile_id?.value ?? username,
+                    username: username,
+                    fullName: username,
+                    avatarURL: avatar,
+                    isVerified: false,
+                    isFollowing: args.inline_follow?.following?.value
+                )
+            }()
             return IGActivity(
                 id: story.pk?.value ?? "\(index)-\(text.hashValue)",
                 text: text,
-                avatarURL: IGJSON.url(args.profile_image),
-                thumbURL: IGJSON.url(thumb),
-                date: args.timestamp.map { Date(timeIntervalSince1970: $0.value) }
+                avatarURL: avatar,
+                thumbURL: IGJSON.url(firstMedia?.image),
+                date: args.timestamp.map { Date(timeIntervalSince1970: $0.value) },
+                user: actor,
+                mediaID: firstMedia?.id?.value,
+                isNew: entry.1
             )
         }
     }

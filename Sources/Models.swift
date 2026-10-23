@@ -242,6 +242,9 @@ struct IGActivity: Identifiable, Hashable, Sendable {
     let avatarURL: URL?
     let thumbURL: URL?
     let date: Date?
+    var user: IGUser? = nil
+    var mediaID: String? = nil
+    var isNew: Bool = false
 }
 
 struct IGNote: Identifiable, Hashable, Sendable {
@@ -898,22 +901,47 @@ enum IGJSON {
     }
 
     static func activities(in json: [String: Any]) -> [IGActivity] {
-        var stories: [[String: Any]] = []
-        for key in ["new_stories", "old_stories"] {
-            stories += (json[key] as? [[String: Any]]) ?? []
+        let newStories = (json["new_stories"] as? [[String: Any]]) ?? []
+        let oldStories = (json["old_stories"] as? [[String: Any]]) ?? []
+        var tagged: [(story: [String: Any], isNew: Bool)] =
+            newStories.map { ($0, true) } + oldStories.map { ($0, false) }
+        if tagged.isEmpty, let aymf = json["stories"] as? [[String: Any]] {
+            tagged = aymf.map { ($0, false) }
         }
-        if stories.isEmpty, let aymf = json["stories"] as? [[String: Any]] { stories = aymf }
 
-        return stories.enumerated().compactMap { index, story in
+        return tagged.enumerated().compactMap { index, entry in
+            let story = entry.story
             guard let args = story["args"] as? [String: Any],
                   let text = args["text"] as? String, !text.isEmpty else { return nil }
             let media = (args["media"] as? [[String: Any]])?.first
+            let avatar = url(args["profile_image"])
+            let profileID = string(args["profile_id"])
+            let profileName = (args["profile_name"] as? String)
+                ?? ((args["inline_follow"] as? [String: Any])?["user_info"] as? [String: Any])?["username"] as? String
+                ?? text.split(separator: " ").first.map(String.init)
+            let actor: IGUser? = {
+                if let inlineUserDict = (args["inline_follow"] as? [String: Any])?["user_info"] as? [String: Any],
+                   let parsed = user(inlineUserDict) {
+                    return parsed
+                }
+                guard let username = profileName, !username.isEmpty else { return nil }
+                return IGUser(
+                    id: profileID ?? username,
+                    username: username,
+                    fullName: username,
+                    avatarURL: avatar,
+                    isVerified: false
+                )
+            }()
             return IGActivity(
                 id: string(story["pk"]) ?? "\(index)-\(text.hashValue)",
                 text: text,
-                avatarURL: url(args["profile_image"]),
+                avatarURL: avatar,
                 thumbURL: url(media?["image"]),
-                date: double(args["timestamp"]).map { Date(timeIntervalSince1970: $0) }
+                date: double(args["timestamp"]).map { Date(timeIntervalSince1970: $0) },
+                user: actor,
+                mediaID: string(media?["id"]),
+                isNew: entry.isNew
             )
         }
     }

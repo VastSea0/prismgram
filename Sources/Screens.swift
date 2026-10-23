@@ -128,16 +128,32 @@ struct LoopingVideo: View {
     var isPlaying: Bool
     var isMuted: Bool
     var fillsFrame = true
+    var showsProgressBar = false
 
     @State private var player: AVQueuePlayer?
     @State private var looper: AVPlayerLooper?
+    @State private var timeObserver: Any?
+    @State private var progress: Double = 0
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
             Color.black
             if let player {
                 PlayerSurface(player: player, showsControls: false, fillsFrame: fillsFrame)
                     .allowsHitTesting(false)
+            }
+            if showsProgressBar {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(.white.opacity(0.24))
+                        Rectangle()
+                            .fill(.white.opacity(0.9))
+                            .frame(width: max(0, geo.size.width * progress))
+                    }
+                }
+                .frame(height: 2.5)
+                .allowsHitTesting(false)
             }
         }
         .onAppear {
@@ -145,10 +161,26 @@ struct LoopingVideo: View {
                 let queue = AVQueuePlayer()
                 looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: url))
                 player = queue
+                if showsProgressBar {
+                    let interval = CMTime(seconds: 0.08, preferredTimescale: 600)
+                    timeObserver = queue.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak queue] time in
+                        guard let duration = queue?.currentItem?.duration.seconds,
+                              duration.isFinite, duration > 0 else { return }
+                        let current = time.seconds
+                        guard current.isFinite else { return }
+                        Task { @MainActor in
+                            progress = min(max(current / duration, 0), 1)
+                        }
+                    }
+                }
             }
             apply()
         }
         .onDisappear {
+            if let timeObserver, let player {
+                player.removeTimeObserver(timeObserver)
+            }
+            timeObserver = nil
             player?.pause()
             looper?.disableLooping()
             looper = nil
@@ -425,26 +457,41 @@ struct PostView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        let userStoryTray = store.stories.first {
+            $0.user.id == post.user.id || $0.user.username.lowercased() == post.user.username.lowercased()
+        }
+        return HStack(spacing: 10) {
+            Button {
+                if let tray = userStoryTray {
+                    store.openStory(tray, in: store.stories)
+                } else {
+                    store.openProfile(of: post.user)
+                }
+            } label: {
+                AvatarView(
+                    url: post.user.avatarURL,
+                    size: 32,
+                    ring: userStoryTray.map { $0.hasUnseen ? .unseen : .seen } ?? .none
+                )
+            }
+            .buttonStyle(.plain)
+
             Button { store.openProfile(of: post.user) } label: {
-                HStack(spacing: 10) {
-                    AvatarView(url: post.user.avatarURL, size: 32)
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            Text(post.user.username)
-                                .font(.system(size: 13.5, weight: .semibold))
-                            if post.user.isVerified {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.blue)
-                            }
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(post.user.username)
+                            .font(.system(size: 13.5, weight: .semibold))
+                        if post.user.isVerified {
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.blue)
                         }
-                        if let location = post.locationName {
-                            Text(location)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                    }
+                    if let location = post.locationName {
+                        Text(location)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
             }
@@ -909,6 +956,11 @@ struct ReelPage: View {
 
     @State private var isPaused = false
     @State private var flashSymbol: String?
+    @State private var isCaptionExpanded = false
+
+    private var permalink: URL {
+        URL(string: "https://www.instagram.com/reel/\(reel.code)/") ?? URL(string: "https://www.instagram.com/")!
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -936,7 +988,7 @@ struct ReelPage: View {
     private var video: some View {
         ZStack {
             if let url = reel.items.first?.videoURL {
-                LoopingVideo(url: url, isPlaying: isActive && !isPaused, isMuted: isMuted)
+                LoopingVideo(url: url, isPlaying: isActive && !isPaused, isMuted: isMuted, showsProgressBar: true)
             } else {
                 RemoteImage(url: reel.items.first?.imageURL)
             }
@@ -948,6 +1000,19 @@ struct ReelPage: View {
                     .background(Circle().fill(.black.opacity(0.45)))
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                isMuted.toggle()
+            } label: {
+                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(.black.opacity(0.42)))
+            }
+            .buttonStyle(.plain)
+            .padding(14)
         }
         .contentShape(.rect)
         .onTapGesture(count: 2) {
@@ -989,20 +1054,44 @@ struct ReelPage: View {
 
     private var caption: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button { store.openProfile(of: reel.user) } label: {
-                HStack(spacing: 8) {
-                    AvatarView(url: reel.user.avatarURL, size: 30)
-                    Text(reel.user.username)
-                        .font(.system(size: 13.5, weight: .semibold))
-                    if reel.user.isVerified { VerifiedBadge(size: 11) }
+            HStack(spacing: 8) {
+                Button { store.openProfile(of: reel.user) } label: {
+                    HStack(spacing: 8) {
+                        AvatarView(url: reel.user.avatarURL, size: 32)
+                        Text(reel.user.username)
+                            .font(.system(size: 13.5, weight: .semibold))
+                        if reel.user.isVerified { VerifiedBadge(size: 11) }
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if reel.user.id != store.viewerID && reel.user.isFollowing != true {
+                    Button {
+                        store.openProfile(of: reel.user)
+                    } label: {
+                        Text("Profili Gör")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.75), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .buttonStyle(.plain)
 
             if !reel.caption.isEmpty {
                 Text(reel.caption)
                     .font(.system(size: 13))
-                    .lineLimit(2)
+                    .lineLimit(isCaptionExpanded ? 8 : 2)
+                    .onTapGesture {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            isCaptionExpanded.toggle()
+                        }
+                    }
             }
         }
         .foregroundStyle(.white)
@@ -1023,17 +1112,44 @@ struct ReelPage: View {
                 withAnimation(.spring(duration: 0.28, bounce: 0.4)) { store.toggleSave(reel) }
             }
             .symbolEffect(.bounce, value: reel.hasSaved)
-            Button {
-                NSWorkspace.shared.open(URL(string: "https://www.instagram.com/reel/\(reel.code)/")!)
+            Menu {
+                Button {
+                    store.openProfile(of: reel.user)
+                } label: {
+                    Label("@\(reel.user.username) Profilini Aç", systemImage: "person.crop.circle")
+                }
+                Button {
+                    store.detailPost = reel
+                } label: {
+                    Label("Yorumları Gör", systemImage: "bubble.right")
+                }
+                Button {
+                    store.sharePost = reel
+                } label: {
+                    Label("Gönderiyi Paylaş", systemImage: "paperplane")
+                }
+                Divider()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+                } label: {
+                    Label("Bağlantıyı Kopyala", systemImage: "link")
+                }
+                Button {
+                    NSWorkspace.shared.open(permalink)
+                } label: {
+                    Label("Tarayıcıda Aç", systemImage: "safari")
+                }
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(light ? Color.white : Color.primary)
                     .frame(width: 40, height: 24)
                     .contentShape(.rect)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(light ? Color.white : Color.primary)
-            .help("Tarayıcıda Aç")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
         }
         .shadow(color: light ? .black.opacity(0.3) : .clear, radius: 3, y: 1)
     }
@@ -1062,28 +1178,69 @@ struct ReelPage: View {
 struct ActivityView: View {
     @Bindable var store: AppStore
 
-    var body: some View {
-        List(store.activity) { item in
-            HStack(spacing: 12) {
-                AvatarView(url: item.avatarURL, size: 40)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.text)
-                        .font(.system(size: 13))
-                        .lineLimit(3)
-                    if let date = item.date {
-                        Text(date, format: .relative(presentation: .named))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
+    private struct ActivitySection: Identifiable {
+        let id: String
+        let title: String
+        let items: [IGActivity]
+    }
+
+    private var sections: [ActivitySection] {
+        let now = Date.now
+        let calendar = Calendar.current
+        var newItems: [IGActivity] = []
+        var todayItems: [IGActivity] = []
+        var weekItems: [IGActivity] = []
+        var monthItems: [IGActivity] = []
+        var olderItems: [IGActivity] = []
+
+        for item in store.activity {
+            if item.isNew {
+                newItems.append(item)
+            } else if let date = item.date {
+                if calendar.isDateInToday(date) {
+                    todayItems.append(item)
+                } else if let days = calendar.dateComponents([.day], from: date, to: now).day, days <= 7 {
+                    weekItems.append(item)
+                } else if let days = calendar.dateComponents([.day], from: date, to: now).day, days <= 30 {
+                    monthItems.append(item)
+                } else {
+                    olderItems.append(item)
                 }
-                Spacer(minLength: 6)
-                if let thumb = item.thumbURL {
-                    RemoteImage(url: thumb, maxPixelSize: 128)
-                        .frame(width: 42, height: 42)
-                        .clipShape(.rect(cornerRadius: 6))
+            } else {
+                olderItems.append(item)
+            }
+        }
+
+        var result: [ActivitySection] = []
+        if !newItems.isEmpty { result.append(ActivitySection(id: "new", title: "Yeni", items: newItems)) }
+        if !todayItems.isEmpty { result.append(ActivitySection(id: "today", title: "Bugün", items: todayItems)) }
+        if !weekItems.isEmpty { result.append(ActivitySection(id: "week", title: "Bu Hafta", items: weekItems)) }
+        if !monthItems.isEmpty { result.append(ActivitySection(id: "month", title: "Bu Ay", items: monthItems)) }
+        if !olderItems.isEmpty { result.append(ActivitySection(id: "older", title: "Daha Eski", items: olderItems)) }
+        return result
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(sections) { section in
+                    Text(section.title)
+                        .font(.system(size: 15, weight: .bold))
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 8)
+
+                    ForEach(section.items) { item in
+                        activityRow(item)
+                    }
+
+                    Divider()
+                        .opacity(0.45)
+                        .padding(.top, 6)
                 }
             }
-            .padding(.vertical, 4)
+            .frame(maxWidth: store.layoutMode == .phone ? .infinity : 600)
+            .frame(maxWidth: .infinity)
         }
         .overlay {
             LoadStateView(phase: store.activityPhase, isEmpty: store.activity.isEmpty, emptyTitle: "Bildirim yok", emptySymbol: "heart") {
@@ -1091,5 +1248,83 @@ struct ActivityView: View {
             }
         }
         .task { await store.ensureLoaded(.activity) }
+    }
+
+    private func activityRow(_ item: IGActivity) -> some View {
+        let userStoryTray = item.user.flatMap { actor in
+            store.stories.first {
+                $0.user.id == actor.id || $0.user.username.lowercased() == actor.username.lowercased()
+            }
+        }
+
+        return HStack(spacing: 12) {
+            Button {
+                if let tray = userStoryTray {
+                    store.openStory(tray, in: store.stories)
+                } else if let user = item.user {
+                    store.openProfile(of: user)
+                } else {
+                    store.openActivity(item)
+                }
+            } label: {
+                AvatarView(
+                    url: item.avatarURL,
+                    size: 44,
+                    ring: userStoryTray.map { $0.hasUnseen ? .unseen : .seen } ?? .none
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                store.openActivity(item)
+            } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        formattedText(for: item)
+                            .font(.system(size: 13.5))
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                        if let date = item.date {
+                            Text(date, format: .relative(presentation: .named))
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer(minLength: 6)
+
+                    if let thumb = item.thumbURL {
+                        RemoteImage(url: thumb, maxPixelSize: 160)
+                            .frame(width: 44, height: 44)
+                            .clipShape(.rect(cornerRadius: 6, style: .continuous))
+                    } else if let user = item.user {
+                        Text(user.isFollowing == true ? "Takiptesin" : "Profili Gör")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(user.isFollowing == true ? Color.primary : Color.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(user.isFollowing == true ? Color.primary.opacity(0.1) : Color.igBlue)
+                            )
+                    }
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(item.isNew ? Color.igBlue.opacity(0.05) : Color.clear)
+    }
+
+    private func formattedText(for item: IGActivity) -> Text {
+        if let username = item.user?.username,
+           !username.isEmpty,
+           item.text.hasPrefix(username) {
+            let remainder = String(item.text.dropFirst(username.count))
+            return Text("\(Text(username).fontWeight(.semibold))\(remainder)")
+        }
+        return Text(item.text)
     }
 }

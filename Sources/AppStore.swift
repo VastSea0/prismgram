@@ -523,6 +523,62 @@ final class AppStore {
         }
     }
 
+    /// Opens the target media or user profile from an Activity (notification) row.
+    func openActivity(_ item: IGActivity) {
+        if let rawMediaID = item.mediaID, !rawMediaID.isEmpty {
+            let shortPK = rawMediaID.split(separator: "_").first.map(String.init) ?? rawMediaID
+            let allKnown = feed + explore + reels + profileGrids.values.flatMap(\.items)
+            if let existing = allKnown.first(where: { $0.id == rawMediaID || $0.id == shortPK }) {
+                openFromGrid(existing)
+                return
+            }
+            let placeholderUser = item.user ?? profile ?? IGUser(
+                id: viewerID ?? "instagram",
+                username: profile?.username ?? "instagram",
+                fullName: "",
+                avatarURL: profile?.avatarURL,
+                isVerified: false
+            )
+            let placeholder = IGPost(
+                id: shortPK,
+                code: shortPK,
+                user: placeholderUser,
+                locationName: nil,
+                items: [
+                    IGMediaItem(
+                        id: shortPK,
+                        thumbURL: item.thumbURL,
+                        imageURL: item.thumbURL,
+                        videoURL: nil,
+                        aspectRatio: 1.0
+                    )
+                ],
+                caption: "",
+                takenAt: item.date ?? .now,
+                likeCount: 0,
+                commentCount: 0,
+                hasLiked: false,
+                hasSaved: false
+            )
+            withAnimation(.snappy(duration: 0.22)) {
+                inlinePost = placeholder
+            }
+            Task {
+                if let fetched = try? await run({ try await $0.mediaInfo(mediaID: shortPK) }) {
+                    if fetched.isVideo && fetched.items.count == 1 {
+                        openReel(fetched)
+                    } else {
+                        applyHydratedPost(fetched, fallbackID: shortPK)
+                    }
+                }
+            }
+            return
+        }
+        if let user = item.user {
+            openProfile(of: user)
+        }
+    }
+
     private func openByShortcode(_ code: String, preferReel: Bool) {
         if let existing = livePostByCode(code) {
             if preferReel || existing.isVideo {
