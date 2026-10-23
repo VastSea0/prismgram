@@ -8,7 +8,7 @@ import Foundation
 /// Web Inspector (the view is inspectable) and call e.g. `await __prismgram.currentPath()`.
 enum BridgeScripts {
     /// Bump when the bridge's methods or results change shape.
-    static let version = 3
+    static let version = 4
 
     /// Installs `window.__prismgram` unless it already exists. Injected at document start and
     /// prepended to calls (see `InstagramClient.callBridge`) in case the page replaced its window.
@@ -136,16 +136,11 @@ enum BridgeScripts {
             },
 
             /// Navigates inside the single-page app without a reload, the way a click on a link would.
+            /// Never synthesizes a temporary `<a>` click: outside React's link tree that triggers a full
+            /// document reload and tears down the running web app.
             navigate(path) {
                 const exact = document.querySelector('a[href="' + path + '"]');
                 if (exact) { exact.click(); return 'click'; }
-                const temp = document.createElement('a');
-                temp.href = path;
-                temp.style.display = 'none';
-                document.body.appendChild(temp);
-                temp.click();
-                temp.remove();
-                if (window.location.pathname === path) { return 'anchor'; }
                 window.history.pushState({}, '', path);
                 window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
                 return 'push';

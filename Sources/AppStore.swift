@@ -168,7 +168,8 @@ final class AppStore {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         let opName = event.label.components(separatedBy: " #").first ?? ""
-        if SchemaDump.folder != nil, opName.hasPrefix("IGD") || opName.hasPrefix("Polaris") || opName.contains("Direct") {
+        InstagramClient.debugLog("tap: \(event.method) \(event.url) label=\(event.label.isEmpty ? "-" : event.label)")
+        if SchemaDump.folder != nil, !opName.isEmpty {
             SchemaDump.write(json, name: opName)
         }
 
@@ -182,15 +183,20 @@ final class AppStore {
                 }
             }
 
-        case "PolarisDirectInboxQuery":
+        // The inbox arrives under several names depending on what the page is doing; all carry the same mailbox shape.
+        // Only mark directPhase = .loaded when the query actually carries message previews (PolarisDirectInboxQuery)
+        // so background badge/jewel queries at boot don't short-circuit loadDirect().
+        case "PolarisDirectInboxQuery", "IGDChatTabsJewelOffMsysQuery", "IGDBadgeCountOffMsysQuery":
             let parsed = IGJSON.directThreads(from: json)
             if !parsed.isEmpty {
                 mergeThreads(parsed)
                 if selectedThreadID == nil {
                     selectedThreadID = directThreads.first?.id
                 }
-                directPhase = .loaded
-            } else if directPhase == .loading {
+                if opName == "PolarisDirectInboxQuery" || parsed.contains(where: { !$0.messages.isEmpty || !$0.snippet.isEmpty }) {
+                    directPhase = .loaded
+                }
+            } else if directPhase == .loading && opName == "PolarisDirectInboxQuery" {
                 directPhase = .loaded
             }
 
@@ -221,6 +227,17 @@ final class AppStore {
         case "IGDThreadDetailQuery":
             if let detailed = IGJSON.directThreadDetail(from: json) {
                 mergeDetailedThread(detailed)
+            }
+
+        case "PolarisFeedTimelineRootV2Query", "PolarisFeedTimelineQuery":
+            let posts = IGJSON.collectPosts(in: json)
+            if !posts.isEmpty {
+                let known = Set(feed.map(\.id))
+                let fresh = posts.filter { !known.contains($0.id) }
+                if !fresh.isEmpty {
+                    feed += fresh
+                    if feedPhase != .loaded { feedPhase = .loaded }
+                }
             }
 
         default:
@@ -417,6 +434,12 @@ final class AppStore {
             feed = page.posts
             feedCursor = page.nextCursor
             feedPhase = .loaded
+            // The first answer is often a small "shell" of the feed; keep asking until there is enough to scroll.
+            var rounds = 0
+            while feed.count < 8, feedCursor != nil, rounds < 4 {
+                rounds += 1
+                await loadMoreFeed()
+            }
             if viewerUsername == nil, let detected = await client.detectViewerUsername() {
                 viewerUsername = detected
             }
@@ -610,9 +633,9 @@ final class AppStore {
             _ = await client.navigate(to: "/direct/inbox/")
             for _ in 0..<24 {
                 try? await Task.sleep(for: .milliseconds(400))
-                if !directThreads.isEmpty { return true }
+                if directPhase == .loaded { return true }
             }
-            return false
+            return !directThreads.isEmpty
         }
         if loaded {
             directPhase = .loaded

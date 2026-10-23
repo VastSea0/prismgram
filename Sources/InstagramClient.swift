@@ -62,6 +62,8 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     private static let readinessTimeout: Duration = .seconds(20)
     /// How long after `didFinish` the boot signal may take before the loaded document is used anyway.
     private static let bootGracePeriod: Duration = .seconds(3)
+    /// How long after a navigation starts the page is used anyway if it neither boots nor finishes.
+    private static let navigationFallbackPeriod: Duration = .seconds(10)
 
     /// Fallbacks only: the bridge prefers the values found in the page's own scripts (`__prismgram.config`).
     static let appID = "936619743392459"
@@ -150,8 +152,10 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
         _ = await waitUntilReady(timeout: Self.readinessTimeout)
     }
 
-    /// The page is usable once its document finished loading and the single-page app has booted.
-    private var isReady: Bool { isDocumentLoaded && isAppBooted }
+    /// The page is usable once the single-page app has booted. The boot signal (or the fallbacks
+    /// below) is enough on its own: instagram.com can keep a document "loading" for a long time, so
+    /// `didFinish` must not be required.
+    private var isReady: Bool { isAppBooted }
 
     /// Suspends until the page is ready, or the timeout passes. Returns whether the page is ready.
     private func waitUntilReady(timeout: Duration) async -> Bool {
@@ -182,6 +186,8 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     fileprivate func appDidBoot(path: String, bridgeVersion: Int) {
         guard !isAppBooted else { return }
         isAppBooted = true
+        isDocumentLoaded = true
+        bootFallback?.cancel()
         Self.debugLog("page booted at \(path) (page bridge v\(bridgeVersion), app bridge v\(BridgeScripts.version))")
         resumeWaitersIfReady()
         if Self.isDebugging {
@@ -198,20 +204,26 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isDocumentLoaded = false
         isAppBooted = false
-        bootFallback?.cancel()
+        armBootFallback(after: Self.navigationFallbackPeriod)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isDocumentLoaded = true
-        resumeWaitersIfReady()
         guard !isAppBooted else { return }
         // If the boot signal never comes (the markup it looks for changed), don't hold every request
         // until the readiness timeout: treat the loaded document as ready after a short grace period.
+        armBootFallback(after: Self.bootGracePeriod)
+    }
+
+    /// Marks the page ready after `delay` if neither the boot signal nor `didFinish` has done so,
+    /// as long as the web view shows some document.
+    private func armBootFallback(after delay: Duration) {
         bootFallback?.cancel()
         bootFallback = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.bootGracePeriod)
-            guard !Task.isCancelled, let self, self.isDocumentLoaded, !self.isAppBooted else { return }
-            Self.debugLog("no boot signal after load; using the loaded document")
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self, !self.isAppBooted, self.webView.url != nil else { return }
+            Self.debugLog("no boot signal; using the current document")
+            self.isDocumentLoaded = true
             self.isAppBooted = true
             self.resumeWaitersIfReady()
         }
