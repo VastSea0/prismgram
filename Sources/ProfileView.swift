@@ -92,7 +92,7 @@ struct ProfileView: View {
                             showsViewCount: section == .reels,
                             showsPin: section == .posts
                         ) {
-                            store.detailPost = post
+                            store.openFromGrid(post, queue: page.items, forceReel: section == .reels)
                         }
                         .onAppear {
                             if post.id == page.items.dropLast(5).last?.id || post.id == page.items.last?.id {

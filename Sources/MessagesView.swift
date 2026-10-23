@@ -520,24 +520,11 @@ struct DirectConversationView: View {
                                 layout: layout,
                                 avatarURL: message.senderAvatarURL ?? thread.users.first(where: { $0.username == message.senderUsername })?.avatarURL,
                                 peerName: thread.isGroup ? nil : thread.users.first?.username,
-                                actions: MessageActions(
-                                    react: { store.react($0, to: message, in: thread) },
-                                    reply: {
-                                        withAnimation(.snappy(duration: 0.2)) { replyingTo = message }
-                                        composerFocused = true
-                                    },
-                                    retry: { store.retryDirectMessage(message, in: thread) },
-                                    openMedia: { media in withAnimation(.easeOut(duration: 0.2)) { preview = media } },
-                                    openLink: { store.openWeb($0) }
-                                )
+                                actions: messageActions(for: message, in: thread)
                             )
                         }
                         .id(message.id)
-                        .transition(
-                            message.isFromViewer
-                                ? .asymmetric(insertion: .move(edge: .bottom).combined(with: .scale(scale: 0.6, anchor: .bottomTrailing)).combined(with: .opacity), removal: .opacity)
-                                : .asymmetric(insertion: .scale(scale: 0.85, anchor: .bottomLeading).combined(with: .opacity), removal: .opacity)
-                        )
+                        .transition(messageTransition(for: message))
                     }
                 }
                 .padding(.horizontal, 12)
@@ -565,6 +552,46 @@ struct DirectConversationView: View {
                 }
             }
         }
+    }
+
+    private func messageActions(for message: IGDirectMessage, in thread: IGDirectThread) -> MessageActions {
+        MessageActions(
+            react: { store.react($0, to: message, in: thread) },
+            reply: {
+                withAnimation(.snappy(duration: 0.2)) { replyingTo = message }
+                composerFocused = true
+            },
+            retry: { store.retryDirectMessage(message, in: thread) },
+            openMedia: { media in withAnimation(.easeOut(duration: 0.2)) { preview = media } },
+            openLink: { store.openWeb($0) },
+            openShare: { store.openSharedMessage(message) },
+            openProfile: { name in
+                store.openProfile(
+                    of: IGUser(
+                        id: name,
+                        username: name,
+                        fullName: name,
+                        avatarURL: message.share?.avatarURL,
+                        isVerified: false
+                    )
+                )
+            }
+        )
+    }
+
+    private func messageTransition(for message: IGDirectMessage) -> AnyTransition {
+        if message.isFromViewer {
+            return .asymmetric(
+                insertion: .move(edge: .bottom)
+                    .combined(with: .scale(scale: 0.6, anchor: .bottomTrailing))
+                    .combined(with: .opacity),
+                removal: .opacity
+            )
+        }
+        return .asymmetric(
+            insertion: .scale(scale: 0.85, anchor: .bottomLeading).combined(with: .opacity),
+            removal: .opacity
+        )
     }
 
     // MARK: Composer (iOS 26 Messages: round + button and a glass field)
@@ -787,6 +814,8 @@ struct MessageActions {
     let retry: () -> Void
     let openMedia: (IGMediaItem) -> Void
     let openLink: (URL) -> Void
+    let openShare: () -> Void
+    let openProfile: (String) -> Void
 }
 
 /// Instagram's quick reactions.
@@ -894,11 +923,11 @@ private struct MessageRow: View {
         VStack(alignment: outgoing ? .trailing : .leading, spacing: 3) {
             switch message.kind {
             case .reel, .post, .story:
-                ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
+                ShareCard(message: message, openShare: actions.openShare, openProfile: actions.openProfile)
             case .storyReply where message.media != nil || message.share != nil:
-                ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
+                ShareCard(message: message, openShare: actions.openShare, openProfile: actions.openProfile)
             case .link where message.share != nil:
-                ShareCard(message: message, openMedia: actions.openMedia, openLink: actions.openLink)
+                ShareCard(message: message, openShare: actions.openShare, openProfile: actions.openProfile)
             case .voice:
                 VoiceBubble(url: message.audioURL, outgoing: outgoing, hasTail: layout.isLastInGroup)
             case .sticker:
@@ -1100,8 +1129,8 @@ private struct MessageMediaBubble: View {
 /// A shared reel, post or story drawn the way Instagram does: owner header, preview and caption.
 private struct ShareCard: View {
     let message: IGDirectMessage
-    let openMedia: (IGMediaItem) -> Void
-    let openLink: (URL) -> Void
+    let openShare: () -> Void
+    let openProfile: (String) -> Void
 
     private var ratio: Double {
         switch message.kind {
@@ -1112,13 +1141,7 @@ private struct ShareCard: View {
 
     var body: some View {
         let width: CGFloat = 220
-        Button {
-            if let link = message.share?.url {
-                openLink(link)
-            } else if let media = message.media {
-                openMedia(media)
-            }
-        } label: {
+        Button(action: openShare) {
             VStack(alignment: .leading, spacing: 0) {
                 if let title = message.share?.title {
                     HStack(spacing: 7) {

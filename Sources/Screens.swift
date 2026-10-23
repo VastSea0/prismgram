@@ -712,8 +712,10 @@ struct ExploreView: View {
     }
 
     private func tile(_ post: IGPost, width: CGFloat, height: CGFloat) -> some View {
-        MediaGridTile(post: post, aspectRatio: width / max(height, 1)) { store.detailPost = post }
-            .frame(width: width, height: height)
+        MediaGridTile(post: post, aspectRatio: width / max(height, 1)) {
+            store.openFromGrid(post, queue: store.explore)
+        }
+        .frame(width: width, height: height)
     }
 
     // MARK: Search
@@ -849,14 +851,13 @@ struct MediaGridTile: View {
 
 struct ReelsView: View {
     @Bindable var store: AppStore
-    @State private var activeID: String?
     @AppStorage(Preference.reelsMuted) private var isMuted = false
 
     var body: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(store.reels) { reel in
-                    ReelPage(reel: reel, store: store, isActive: reel.id == (activeID ?? store.reels.first?.id), isMuted: $isMuted)
+                    ReelPage(reel: reel, store: store, isActive: reel.id == (store.selectedReelID ?? store.reels.first?.id), isMuted: $isMuted)
                         .containerRelativeFrame([.horizontal, .vertical])
                         .id(reel.id)
                         .onAppear {
@@ -870,8 +871,28 @@ struct ReelsView: View {
         }
         .scrollTargetBehavior(.paging)
         .scrollIndicators(.never)
-        .scrollPosition(id: $activeID)
+        .scrollPosition(id: $store.selectedReelID)
         .background(store.layoutMode == .phone ? Color.black : Color.clear)
+        .overlay(alignment: .topLeading) {
+            if store.canGoBack {
+                Button {
+                    store.closeOtherProfile()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.backward")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Geri")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(.black.opacity(0.45)))
+                }
+                .buttonStyle(.plain)
+                .padding(14)
+            }
+        }
         .overlay {
             LoadStateView(phase: store.reelsPhase, isEmpty: store.reels.isEmpty, emptyTitle: "Reels bulunamadı", emptySymbol: "play.rectangle") {
                 Task { await store.refresh(.reels) }

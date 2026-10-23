@@ -114,13 +114,17 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         Group {
-            switch store.tab {
-            case .home: HomeView(store: store)
-            case .explore: ExploreView(store: store)
-            case .reels: ReelsView(store: store)
-            case .activity: ActivityView(store: store)
-            case .direct: MessagesView(store: store)
-            case .profile: ProfileView(store: store)
+            if let inlinePost = store.inlinePost {
+                InlinePostView(postID: inlinePost.id, fallback: inlinePost, store: store)
+            } else {
+                switch store.tab {
+                case .home: HomeView(store: store)
+                case .explore: ExploreView(store: store)
+                case .reels: ReelsView(store: store)
+                case .activity: ActivityView(store: store)
+                case .direct: MessagesView(store: store)
+                case .profile: ProfileView(store: store)
+                }
             }
         }
         .navigationTitle(navigationTitle)
@@ -128,6 +132,9 @@ struct ContentView: View {
     }
 
     private var navigationTitle: String {
+        if let inlinePost = store.inlinePost {
+            return "@\(inlinePost.user.username)"
+        }
         if store.tab == .profile, let username = store.profile?.username {
             return "@\(username)"
         }

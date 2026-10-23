@@ -66,6 +66,10 @@ final class AppStore {
     private(set) var storyQueue: [IGStoryTray] = []
     private var loadingStoryIDs: Set<String> = []
     var detailPost: IGPost?
+    var inlinePost: IGPost?
+    var selectedReelID: String?
+    private var reelReturnTab: InstagramTab?
+    private var hydratingShortcode: String?
     var sharePost: IGPost?
     var isShowingLogin = false
     var isShowingInstagramSettings = false
@@ -250,6 +254,12 @@ final class AppStore {
             }
 
         default:
+            if let targetCode = hydratingShortcode {
+                let posts = IGJSON.collectPosts(in: json)
+                if let matched = posts.first(where: { $0.code == targetCode }) ?? posts.first {
+                    applyHydratedPost(matched, fallbackID: matched.id)
+                }
+            }
             if let section = capture, section != .posts, pageProfileTarget != nil,
                !opName.contains("Ads"), !opName.contains("Suggested") {
                 let posts = IGJSON.collectPosts(in: json)
@@ -312,6 +322,10 @@ final class AppStore {
     func select(_ newTab: InstagramTab) {
         haptic(.alignment)
         withAnimation(.snappy(duration: 0.25)) {
+            inlinePost = nil
+            if newTab != .reels {
+                reelReturnTab = nil
+            }
             if newTab == .profile && (tab != .profile || isViewingOtherProfile) {
                 showOwnProfile()
             }
@@ -342,6 +356,7 @@ final class AppStore {
 
     func openProfile(of user: IGUser) {
         detailPost = nil
+        inlinePost = nil
         if storyViewer != nil { closeStory() }
         if user.id == viewerID {
             if tab != .profile { profileReturnTab = tab }
@@ -364,8 +379,17 @@ final class AppStore {
         Task { await loadProfile() }
     }
 
-    /// Back from someone's profile: to the profile opened before it, or to the tab it was opened from.
+    /// Back from an inline post, a Reel opened from another tab, or someone's profile.
     func closeOtherProfile() {
+        if inlinePost != nil {
+            withAnimation(.snappy(duration: 0.22)) { inlinePost = nil }
+            return
+        }
+        if tab == .reels, let destination = reelReturnTab {
+            reelReturnTab = nil
+            withAnimation(.snappy(duration: 0.25)) { tab = destination }
+            return
+        }
         if let previous = profileStack.popLast() {
             profileUserID = previous.id
             profileUsername = previous.username
@@ -385,7 +409,201 @@ final class AppStore {
         }
     }
 
-    var canGoBack: Bool { tab == .profile && isViewingOtherProfile }
+    var canGoBack: Bool {
+        inlinePost != nil || (tab == .reels && reelReturnTab != nil) || (tab == .profile && isViewingOtherProfile)
+    }
+
+    /// Opens a grid tile the way Instagram does: single-video posts and Reels open directly in the Reels
+    /// vertical player; photo and carousel posts open inline with a Back button instead of a popup sheet.
+    func openFromGrid(_ post: IGPost, queue: [IGPost] = [], forceReel: Bool = false) {
+        haptic(.alignment)
+        if forceReel || (post.isVideo && post.items.count == 1) {
+            openReel(post, queue: queue.filter(\.isVideo))
+        } else {
+            withAnimation(.snappy(duration: 0.22)) {
+                inlinePost = post
+            }
+        }
+    }
+
+    /// Switches directly to the Reels tab with `post` playing at the top of the feed.
+    func openReel(_ post: IGPost, queue: [IGPost] = []) {
+        detailPost = nil
+        inlinePost = nil
+        if storyViewer != nil { closeStory() }
+        if tab != .reels {
+            reelReturnTab = tab
+        }
+        var updatedReels = reels.filter { $0.id != post.id && $0.code != post.code }
+        let extraVideos = queue.filter { candidate in
+            candidate.id != post.id
+                && candidate.code != post.code
+                && !updatedReels.contains(where: { $0.id == candidate.id || $0.code == candidate.code })
+        }
+        updatedReels = [post] + extraVideos + updatedReels
+        reels = updatedReels
+        selectedReelID = post.id
+        reelsPhase = .loaded
+        withAnimation(.snappy(duration: 0.25)) {
+            tab = .reels
+        }
+        if post.items.first?.videoURL == nil {
+            Task { await hydratePost(code: post.code, fallbackID: post.id, isReel: true) }
+        }
+    }
+
+    /// Opens a shared Reel, Post, Story or Link from Direct Messages natively without a WebView popup.
+    func openSharedMessage(_ message: IGDirectMessage) {
+        if message.kind == .story || message.kind == .storyReply {
+            if let username = message.share?.title,
+               let tray = stories.first(where: { $0.user.username.lowercased() == username.lowercased() }) {
+                openStory(tray, in: stories)
+                return
+            }
+        }
+
+        let extracted = Self.extractInstagramRoute(from: message.share?.url)
+        let shortcode = extracted?.shortcode
+        let isReel = message.kind == .reel || extracted?.isReel == true
+
+        if let code = shortcode, let existing = livePostByCode(code) {
+            if isReel || existing.isVideo {
+                openReel(existing)
+            } else {
+                withAnimation(.snappy(duration: 0.22)) { inlinePost = existing }
+            }
+            return
+        }
+
+        let resolvedID = shortcode.flatMap(InstagramAPI.mediaPK(fromShortcode:)) ?? message.id
+        let resolvedCode = shortcode ?? resolvedID
+        let authorName = message.share?.title ?? message.senderUsername ?? "instagram"
+        let author = IGUser(
+            id: authorName,
+            username: authorName,
+            fullName: "",
+            avatarURL: message.share?.avatarURL ?? message.senderAvatarURL,
+            isVerified: false
+        )
+        let placeholderItem = message.media ?? IGMediaItem(
+            id: resolvedID,
+            thumbURL: nil,
+            imageURL: nil,
+            videoURL: nil,
+            aspectRatio: isReel ? 9.0 / 16.0 : 1.0
+        )
+        let placeholder = IGPost(
+            id: resolvedID,
+            code: resolvedCode,
+            user: author,
+            locationName: nil,
+            items: [placeholderItem],
+            caption: message.share?.subtitle ?? "",
+            takenAt: message.timestamp,
+            likeCount: 0,
+            commentCount: 0,
+            hasLiked: false,
+            hasSaved: false
+        )
+
+        if isReel {
+            openReel(placeholder)
+            if let code = shortcode {
+                Task { await hydratePost(code: code, fallbackID: placeholder.id, isReel: true) }
+            }
+        } else if shortcode != nil || message.kind == .post {
+            withAnimation(.snappy(duration: 0.22)) {
+                inlinePost = placeholder
+            }
+            if let code = shortcode {
+                Task { await hydratePost(code: code, fallbackID: placeholder.id, isReel: false) }
+            }
+        } else if let link = message.share?.url {
+            openWeb(link)
+        }
+    }
+
+    private func openByShortcode(_ code: String, preferReel: Bool) {
+        if let existing = livePostByCode(code) {
+            if preferReel || existing.isVideo {
+                openReel(existing)
+            } else {
+                withAnimation(.snappy(duration: 0.22)) { inlinePost = existing }
+            }
+            return
+        }
+        let resolvedID = InstagramAPI.mediaPK(fromShortcode: code) ?? code
+        let placeholder = IGPost(
+            id: resolvedID,
+            code: code,
+            user: IGUser(id: "instagram", username: "instagram", fullName: "", avatarURL: nil, isVerified: false),
+            locationName: nil,
+            items: [IGMediaItem(id: resolvedID, thumbURL: nil, imageURL: nil, videoURL: nil, aspectRatio: preferReel ? 9.0 / 16.0 : 1.0)],
+            caption: "",
+            takenAt: .now,
+            likeCount: 0,
+            commentCount: 0,
+            hasLiked: false,
+            hasSaved: false
+        )
+        if preferReel {
+            openReel(placeholder)
+        } else {
+            withAnimation(.snappy(duration: 0.22)) { inlinePost = placeholder }
+        }
+        Task { await hydratePost(code: code, fallbackID: resolvedID, isReel: preferReel) }
+    }
+
+    private func hydratePost(code: String?, fallbackID: String, isReel: Bool) async {
+        if let code, let fetched = try? await run({ try await $0.mediaInfo(shortcode: code) }) {
+            applyHydratedPost(fetched, fallbackID: fallbackID)
+            return
+        }
+        if let fetched = try? await run({ try await $0.mediaInfo(mediaID: fallbackID) }) {
+            applyHydratedPost(fetched, fallbackID: fallbackID)
+            return
+        }
+        guard let code, !code.isEmpty else { return }
+        await client.withPage("hydrate \(code)") {
+            hydratingShortcode = code
+            defer { if hydratingShortcode == code { hydratingShortcode = nil } }
+            _ = await client.navigate(to: "/\(isReel ? "reel" : "p")/\(code)/")
+            for _ in 0..<14 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if let existing = livePostByCode(code), existing.items.first?.videoURL != nil || existing.likeCount > 0 {
+                    break
+                }
+            }
+        }
+    }
+
+    private func applyHydratedPost(_ hydrated: IGPost, fallbackID: String) {
+        if let index = reels.firstIndex(where: { $0.id == fallbackID || $0.id == hydrated.id || $0.code == hydrated.code }) {
+            let wasSelected = (selectedReelID == reels[index].id)
+            reels[index] = hydrated
+            if wasSelected { selectedReelID = hydrated.id }
+        }
+        if let current = inlinePost, current.id == fallbackID || current.id == hydrated.id || current.code == hydrated.code {
+            inlinePost = hydrated
+        }
+        if let current = detailPost, current.id == fallbackID || current.id == hydrated.id || current.code == hydrated.code {
+            detailPost = hydrated
+        }
+    }
+
+    private static func extractInstagramRoute(from url: URL?) -> (shortcode: String, isReel: Bool)? {
+        guard let url, let host = url.host?.lowercased(), host.hasSuffix("instagram.com") else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        guard parts.count >= 2 else { return nil }
+        let kind = parts[0].lowercased()
+        if kind == "reel" || kind == "reels" || kind == "clips" {
+            return (parts[1], true)
+        }
+        if kind == "p" || kind == "tv" {
+            return (parts[1], false)
+        }
+        return nil
+    }
 
     func ensureLoaded(_ tab: InstagramTab) async {
         guard session == .signedIn else { return }
@@ -1062,9 +1280,28 @@ final class AppStore {
         return true
     }
 
-    /// Opens Instagram pages inside the app with the signed-in session; other sites go to the browser.
+    /// Opens Instagram posts, reels, stories and profiles natively; falls back to the in-app browser
+    /// sheet only for web-only pages (like account edit settings), and sends external links to Safari.
     func openWeb(_ url: URL, title: String? = nil) {
         if let host = url.host?.lowercased(), host.hasSuffix("instagram.com") {
+            if let route = Self.extractInstagramRoute(from: url) {
+                openByShortcode(route.shortcode, preferReel: route.isReel)
+                return
+            }
+            let parts = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+            if parts.count >= 2, parts[0].lowercased() == "stories" {
+                let username = parts[1]
+                if let tray = stories.first(where: { $0.user.username.lowercased() == username.lowercased() }) {
+                    openStory(tray, in: stories)
+                    return
+                }
+            }
+            let reserved: Set<String> = ["accounts", "explore", "direct", "reels", "stories", "about", "legal", "challenge", "settings", "developer", "directory"]
+            if parts.count == 1, !reserved.contains(parts[0].lowercased()) {
+                let username = parts[0]
+                openProfile(of: IGUser(id: username, username: username, fullName: "", avatarURL: nil, isVerified: false))
+                return
+            }
             webPage = WebPageRequest(url: url, title: title)
         } else {
             NSWorkspace.shared.open(url)
@@ -1284,10 +1521,19 @@ final class AppStore {
     // MARK: Actions
 
     func livePost(_ id: String) -> IGPost? {
-        feed.first(where: { $0.id == id })
+        if let inlinePost, inlinePost.id == id { return inlinePost }
+        return feed.first(where: { $0.id == id })
             ?? explore.first(where: { $0.id == id })
             ?? reels.first(where: { $0.id == id })
             ?? profileGrids.values.lazy.compactMap { $0.items.first(where: { $0.id == id }) }.first
+    }
+
+    func livePostByCode(_ code: String) -> IGPost? {
+        if let inlinePost, inlinePost.code == code { return inlinePost }
+        return feed.first(where: { $0.code == code })
+            ?? explore.first(where: { $0.code == code })
+            ?? reels.first(where: { $0.code == code })
+            ?? profileGrids.values.lazy.compactMap { $0.items.first(where: { $0.code == code }) }.first
     }
 
     private func mutate(_ id: String, _ change: (inout IGPost) -> Void) {
@@ -1298,6 +1544,10 @@ final class AppStore {
             if let index = profileGrids[section]?.items.firstIndex(where: { $0.id == id }) {
                 change(&profileGrids[section]!.items[index])
             }
+        }
+        if var inline = inlinePost, inline.id == id {
+            change(&inline)
+            inlinePost = inline
         }
         if var open = detailPost, open.id == id {
             change(&open)

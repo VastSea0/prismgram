@@ -796,31 +796,52 @@ enum IGJSON {
         walk(node, depth: 0)
         if let found { return found }
 
-        // Shares and attachments that are not media objects still carry a preview image URL.
+        // Shares and attachments that are not media objects still carry a preview image URL (and sometimes a playable video URL).
         var preview: (image: URL, video: URL?, ratio: Double)?
+        var discoveredVideo: URL?
         func scan(_ value: Any, depth: Int) {
-            guard preview == nil, depth < 9 else { return }
+            guard depth < 9 else { return }
             if let dict = value as? [String: Any] {
+                if discoveredVideo == nil {
+                    for vKey in ["playable_url_quality_hd", "playable_url", "video_url"] {
+                        if let vStr = dict[vKey] as? String, let vURL = URL(string: vStr), vURL.scheme?.hasPrefix("http") == true {
+                            discoveredVideo = vURL
+                            break
+                        }
+                    }
+                    if discoveredVideo == nil,
+                       let attStr = dict["attachment_cdn_url"] as? String,
+                       let attURL = URL(string: attStr),
+                       attURL.path.lowercased().hasSuffix(".mp4") || ((dict["__typename"] as? String) ?? "").lowercased().contains("video") {
+                        discoveredVideo = attURL
+                    }
+                }
+                guard preview == nil else {
+                    for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
+                        scan(child, depth: depth + 1)
+                    }
+                    return
+                }
                 let typename = ((dict["__typename"] as? String) ?? "").lowercased()
                 let isVideoAttachment = typename.contains("video")
                 if let cdnPreview = (dict["preview_cdn_url"] as? String).flatMap(URL.init(string:))
                     ?? (dict["attachment_cdn_url"] as? String).flatMap(URL.init(string:)),
                    isMediaCDN(cdnPreview) || isVideoAttachment {
                     let rawAttachmentURL = (dict["attachment_cdn_url"] as? String).flatMap(URL.init(string:))
-                    let videoURL = isVideoAttachment ? rawAttachmentURL : nil
+                    let videoURL = isVideoAttachment ? rawAttachmentURL : discoveredVideo
                     let imageURL = isMediaCDN(cdnPreview) ? cdnPreview : ((dict["preview_cdn_url"] as? String).flatMap(URL.init(string:)) ?? cdnPreview)
                     let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
                     let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
                     let ratio = width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1
                     preview = (imageURL, videoURL, ratio)
-                    return
-                }
-                for key in ["preview_url", "image_url", "preview_image_url", "uri", "url"] {
-                    if let text = dict[key] as? String, let link = URL(string: text), isMediaCDN(link) {
-                        let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
-                        let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
-                        preview = (link, nil, width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1)
-                        return
+                } else {
+                    for key in ["preview_url", "image_url", "preview_image_url", "uri", "url"] {
+                        if let text = dict[key] as? String, let link = URL(string: text), isMediaCDN(link) {
+                            let width = double(dict["width"]) ?? double(dict["preview_width"]) ?? 0
+                            let height = double(dict["height"]) ?? double(dict["preview_height"]) ?? 0
+                            preview = (link, discoveredVideo, width > 0 && height > 0 ? min(max(width / height, 0.56), 1.91) : 1)
+                            break
+                        }
                     }
                 }
                 for (key, child) in dict where !skippedAttachmentKeys.contains(key) {
@@ -832,7 +853,13 @@ enum IGJSON {
         }
         scan(node, depth: 0)
         return preview.map {
-            IGMediaItem(id: $0.image.absoluteString, thumbURL: $0.image, imageURL: $0.image, videoURL: $0.video, aspectRatio: $0.ratio)
+            IGMediaItem(
+                id: $0.image.absoluteString,
+                thumbURL: $0.image,
+                imageURL: $0.image,
+                videoURL: $0.video ?? discoveredVideo,
+                aspectRatio: $0.ratio
+            )
         }
     }
 
