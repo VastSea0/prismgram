@@ -68,10 +68,11 @@ Do them in order; each depends on the previous ones.
 - [x] `PRISMGRAM_DEBUG` logs lease acquire/release with the purpose and wait time.
 
 ### T2 — Real readiness signal
-- [ ] Extend the document-start script to post an `igReady` message once the SPA has booted
-      (csrftoken cookie present and app root mounted, polled briefly) and again after SPA
-      route changes settle; handle it in Swift.
-- [ ] `waitUntilReady` uses `didFinish` **and** `igReady`; remove the blind `sleep(1.5)` in
+- [x] Add a document-start script that posts an `igReady` message once the SPA has booted
+      (csrftoken cookie present and app root mounted, polled briefly); handle it in Swift.
+      (Route-change signals were dropped: SPA navigations never reset readiness, and the
+      lease-holding flows already poll for the data they wait for.)
+- [x] `waitUntilReady` uses `didFinish` **and** `igReady`; remove the blind `sleep(1.5)` in
       `prepare()` (keep a short fallback timeout so nothing hangs).
 
 ### T3 — One JS bridge object
@@ -119,3 +120,4 @@ Append newest at the bottom: `YYYY-MM-DD HH:MM — <agent> — <task> — <what 
 
 - 2026-10-23 11:05 — Antigravity — setup — Plan written; baseline `swift build` passes. NEXT: T1.
 - 2026-10-23 11:06 — Antigravity — T1 — `InstagramClient.withPage` (FIFO, non-reentrant) wraps story fallback, inbox, open/send/react/reply, profile open and section/scroll loads; stale profile tokens are rechecked after acquiring. Manual check: open a profile while a DM is sending; both should complete. NEXT: T2.
+- 2026-10-23 11:07 — Antigravity — T2 — Readiness = `didFinish` && `igReady` (`bootSignalScript`), with a 3 s grace fallback after `didFinish` so a changed markup never stalls requests; removed the blind 1.5 s sleep. Manual check: `PRISMGRAM_DEBUG=1` should print `page booted at /` on launch. NEXT: T3.

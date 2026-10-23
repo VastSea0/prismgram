@@ -30,6 +30,8 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
     /// How long a request waits for the page to (re)load before giving up.
     private static let readinessTimeout: Duration = .seconds(20)
+    /// How long after `didFinish` the boot signal may take before the loaded document is used anyway.
+    private static let bootGracePeriod: Duration = .seconds(3)
 
     static let appID = "936619743392459"
     /// `PRISMGRAM_DEBUG=1` logs each request's path and HTTP status (never bodies) to standard error.
@@ -41,7 +43,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     var onNetworkEvent: ((NetworkEvent) -> Void)?
 
     private let hostWindow: NSWindow
-    private var isReady = false
+    private var isDocumentLoaded = false
+    private var isAppBooted = false
+    private var bootFallback: Task<Void, Never>?
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var isLeaseHeld = false
     private var leaseQueue: [CheckedContinuation<Void, Never>] = []
@@ -50,6 +54,9 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         let controller = WKUserContentController()
         controller.addUserScript(
             WKUserScript(source: Self.networkTapScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+        controller.addUserScript(
+            WKUserScript(source: Self.bootSignalScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
 
         let configuration = WKWebViewConfiguration()
@@ -83,6 +90,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
         view.navigationDelegate = self
         controller.add(NetworkTapProxy(client: self), name: "igTap")
+        controller.add(NetworkTapProxy(client: self), name: "igReady")
     }
 
     // MARK: Session
@@ -99,15 +107,18 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
     func prepare() async {
         hostWindow.orderBack(nil)
-        isReady = false
+        isDocumentLoaded = false
+        isAppBooted = false
         if let url = URL(string: "https://www.instagram.com/") {
             webView.load(URLRequest(url: url))
         }
         _ = await waitUntilReady(timeout: Self.readinessTimeout)
-        try? await Task.sleep(for: .seconds(1.5))
     }
 
-    /// Suspends until the page has finished loading, or the timeout passes. Returns whether the page is ready.
+    /// The page is usable once its document finished loading and the single-page app has booted.
+    private var isReady: Bool { isDocumentLoaded && isAppBooted }
+
+    /// Suspends until the page is ready, or the timeout passes. Returns whether the page is ready.
     private func waitUntilReady(timeout: Duration) async -> Bool {
         if isReady { return true }
         let timeoutTask = Task { @MainActor [weak self] in
@@ -128,30 +139,60 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         pending.forEach { $0.resume() }
     }
 
+    private func resumeWaitersIfReady() {
+        if isReady { resumeWaiters() }
+    }
+
+    /// Called by the document-start script once the web app has mounted and its csrftoken cookie exists.
+    fileprivate func appDidBoot(path: String) {
+        guard !isAppBooted else { return }
+        isAppBooted = true
+        Self.debugLog("page booted at \(path)")
+        resumeWaitersIfReady()
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        isReady = false
+        isDocumentLoaded = false
+        isAppBooted = false
+        bootFallback?.cancel()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        isReady = true
-        resumeWaiters()
+        isDocumentLoaded = true
+        resumeWaitersIfReady()
+        guard !isAppBooted else { return }
+        // If the boot signal never comes (the markup it looks for changed), don't hold every request
+        // until the readiness timeout: treat the loaded document as ready after a short grace period.
+        bootFallback?.cancel()
+        bootFallback = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.bootGracePeriod)
+            guard !Task.isCancelled, let self, self.isDocumentLoaded, !self.isAppBooted else { return }
+            Self.debugLog("no boot signal after load; using the loaded document")
+            self.isAppBooted = true
+            self.resumeWaitersIfReady()
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         // A failed sub-navigation leaves the previous document usable.
-        isReady = webView.url != nil
+        markUsable(webView.url != nil)
         resumeWaiters()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        isReady = webView.url != nil && !webView.isLoading
+        markUsable(webView.url != nil && !webView.isLoading)
         resumeWaiters()
         if !isReady { scheduleReload() }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        isReady = false
+        markUsable(false)
         scheduleReload()
+    }
+
+    private func markUsable(_ usable: Bool) {
+        isDocumentLoaded = usable
+        isAppBooted = usable
     }
 
     private func scheduleReload() {
@@ -456,6 +497,32 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         return text
     }
 
+    private static let bootSignalScript = #"""
+    (function() {
+        if (window.__igBootWatch) { return; }
+        window.__igBootWatch = true;
+        var tries = 0;
+        function booted() {
+            if (!/(?:^|;\s*)csrftoken=/.test(document.cookie)) { return false; }
+            var root = document.querySelector('[id^="mount_"]');
+            if (root && root.childElementCount > 0) { return true; }
+            return !!document.querySelector('main, nav, [role="main"]');
+        }
+        function check() {
+            if (booted()) {
+                try { window.webkit.messageHandlers.igReady.postMessage({ path: location.pathname }); } catch (_) {}
+                return;
+            }
+            if (++tries < 200) { setTimeout(check, 100); }
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', check);
+        } else {
+            check();
+        }
+    })();
+    """#
+
     private static let networkTapScript = #"""
     (function() {
         if (window.__igTapInstalled) { return; }
@@ -525,6 +592,13 @@ final class NetworkTapProxy: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "igReady" {
+            let path = ((message.body as? NSDictionary)?["path"] as? String) ?? "?"
+            Task { @MainActor [weak client] in
+                client?.appDidBoot(path: path)
+            }
+            return
+        }
         guard message.name == "igTap", let body = message.body as? NSDictionary,
               let url = body["url"] as? String,
               let text = body["body"] as? String else { return }
