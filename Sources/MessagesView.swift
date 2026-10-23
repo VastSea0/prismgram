@@ -392,6 +392,7 @@ struct DirectConversationView: View {
     @State private var draft = ""
     @State private var replyingTo: IGDirectMessage?
     @State private var preview: IGMediaItem?
+    @State private var canAutoLoadOlder = false
     @FocusState private var composerFocused: Bool
 
     private var thread: IGDirectThread? {
@@ -463,10 +464,40 @@ struct DirectConversationView: View {
 
     private func transcript(_ thread: IGDirectThread) -> some View {
         let messages = thread.messages
+        let isLoadingOlder = store.isLoadingOlderMessages(in: thread)
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ConversationIntro(thread: thread, store: store)
+
+                    if thread.hasOlderMessages {
+                        HStack(spacing: 6) {
+                            if isLoadingOlder {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Eski mesajlar yükleniyor…")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Button {
+                                    Task { await store.loadOlderMessages(in: thread) }
+                                } label: {
+                                    Label("Daha eski mesajları yükle", systemImage: "arrow.up.circle")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 5)
+                                        .background(Capsule().fill(Color.messagesGray.opacity(0.6)))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                        .onAppear {
+                            guard canAutoLoadOlder, !isLoadingOlder else { return }
+                            Task { await store.loadOlderMessages(in: thread) }
+                        }
+                    }
 
                     if messages.isEmpty {
                         ProgressView()
@@ -513,7 +544,20 @@ struct DirectConversationView: View {
                 .padding(.bottom, 8)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .task(id: thread.id) {
+                canAutoLoadOlder = false
+                try? await Task.sleep(for: .milliseconds(700))
+                canAutoLoadOlder = true
+            }
+            .onChange(of: messages.count) { oldCount, newCount in
+                if oldCount <= 2, newCount > oldCount, let last = messages.last?.id {
+                    proxy.scrollTo(last, anchor: .bottom)
+                }
+            }
+            .onChange(of: messages.first?.id) { oldFirst, newFirst in
+                guard let oldFirst, let newFirst, oldFirst != newFirst, messages.count > 2 else { return }
+                proxy.scrollTo(oldFirst, anchor: .top)
+            }
             .onChange(of: messages.last?.id) { _, last in
                 guard let last else { return }
                 withAnimation(.spring(duration: 0.35, bounce: 0.15)) {

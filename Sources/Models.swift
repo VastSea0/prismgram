@@ -338,6 +338,7 @@ struct IGDirectThread: Identifiable, Hashable, Sendable {
     var snippet: String
     var viewerFBID: String
     var messages: [IGDirectMessage]
+    var hasOlderMessages: Bool = false
 }
 
 // MARK: - Parsing
@@ -642,48 +643,88 @@ enum IGJSON {
         return result
     }
 
-    static func directThreadDetail(from json: [String: Any]) -> IGDirectThread? {
+    static func directThreadDetail(
+        from json: [String: Any],
+        fallbackThread: IGDirectThread? = nil,
+        viewerID: String = ""
+    ) -> IGDirectThread? {
         guard let data = json["data"] as? [String: Any],
-              let nullable = data["get_slide_thread_nullable"] as? [String: Any],
-              let dict = nullable["as_ig_direct_thread"] as? [String: Any] else { return nil }
-        return directThread(from: dict, isPinnedOverride: nil)
+              let container = (data["get_slide_thread_nullable"] as? [String: Any])
+                  ?? (data["fetch__SlideThread"] as? [String: Any]),
+              let dict = container["as_ig_direct_thread"] as? [String: Any] else { return nil }
+        return directThread(
+            from: dict,
+            isPinnedOverride: nil,
+            fallbackThread: fallbackThread,
+            fallbackViewerID: viewerID
+        )
     }
 
-    private static func directThread(from dict: [String: Any], isPinnedOverride: Bool?) -> IGDirectThread? {
-        let threadID = string(dict["thread_id"]) ?? string(dict["thread_key"]) ?? string(dict["id"])
-        let threadFBID = string(dict["thread_fbid"]) ?? threadID
+    private static func directThread(
+        from dict: [String: Any],
+        isPinnedOverride: Bool?,
+        fallbackThread: IGDirectThread? = nil,
+        fallbackViewerID: String = ""
+    ) -> IGDirectThread? {
+        let rawID = string(dict["id"])?.replacingOccurrences(of: "XFBIGDirectViewerThread:", with: "")
+            .replacingOccurrences(of: "SlideThread:", with: "")
+        let threadID = string(dict["thread_id"])
+            ?? string(dict["thread_key"])
+            ?? fallbackThread?.id
+            ?? rawID
+        let threadFBID = string(dict["thread_fbid"])
+            ?? fallbackThread?.threadFBID
+            ?? rawID
+            ?? threadID
         guard let id = threadID, let fbid = threadFBID else { return nil }
 
         let viewerDict = dict["viewer"] as? [String: Any]
-        let viewerID = string(dict["viewer_id"]) ?? string(viewerDict?["id"]) ?? ""
-        let viewerFBID = string(viewerDict?["interop_messaging_user_fbid"]) ?? viewerID
+        let viewerID = string(dict["viewer_id"])
+            ?? string(viewerDict?["id"])
+            ?? (!fallbackViewerID.isEmpty ? fallbackViewerID : (fallbackThread?.viewerFBID ?? ""))
+        let viewerFBID = string(viewerDict?["interop_messaging_user_fbid"])
+            ?? fallbackThread?.viewerFBID
+            ?? viewerID
 
         let rawUsers = (dict["users"] as? [[String: Any]]) ?? []
         let allUsers = rawUsers.compactMap(user)
         let otherUsers = allUsers.filter { $0.id != viewerID }
-        let participants = otherUsers.isEmpty ? allUsers : otherUsers
+        let parsedParticipants = otherUsers.isEmpty ? allUsers : otherUsers
+        let participants = parsedParticipants.isEmpty ? (fallbackThread?.users ?? []) : parsedParticipants
 
         let rawTitle = (dict["thread_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fallbackTitle = participants.map { $0.fullName.isEmpty ? $0.username : $0.fullName }.joined(separator: ", ")
-        let title = !rawTitle.isEmpty ? rawTitle : (!fallbackTitle.isEmpty ? fallbackTitle : "Sohbet")
+        let title = !rawTitle.isEmpty
+            ? rawTitle
+            : (!fallbackTitle.isEmpty ? fallbackTitle : (fallbackThread?.title ?? "Sohbet"))
 
         let lastMs = double(dict["last_activity_timestamp_ms"]) ?? 0
-        let lastDate = lastMs > 0 ? Date(timeIntervalSince1970: lastMs / 1000.0) : .now
+        let lastDate = lastMs > 0 ? Date(timeIntervalSince1970: lastMs / 1000.0) : (fallbackThread?.lastActivityAt ?? .now)
 
         var messages: [IGDirectMessage] = []
         var latestSnippet = ""
-        if let slideMessages = dict["slide_messages"] as? [String: Any],
-           let edges = slideMessages["edges"] as? [[String: Any]] {
-            for edge in edges {
-                guard let node = edge["node"] as? [String: Any] else { continue }
-                if latestSnippet.isEmpty, let snippet = node["igd_snippet"] as? String, !snippet.isEmpty {
-                    latestSnippet = snippet
+        var hasOlderMessages = false
+        let slideMessages = (dict["slide_messages"] as? [String: Any])
+            ?? (dict["slide_messages_before"] as? [String: Any])
+            ?? (dict["slide_messages_after"] as? [String: Any])
+        if let slideMessages {
+            if let pageInfo = slideMessages["page_info"] as? [String: Any] {
+                hasOlderMessages = bool(pageInfo["has_next_page"])
+                    ?? bool(pageInfo["has_previous_page"])
+                    ?? false
+            }
+            if let edges = slideMessages["edges"] as? [[String: Any]] {
+                for edge in edges {
+                    guard let node = edge["node"] as? [String: Any] else { continue }
+                    if latestSnippet.isEmpty, let snippet = node["igd_snippet"] as? String, !snippet.isEmpty {
+                        latestSnippet = snippet
+                    }
+                    guard let message = directMessage(node, viewerFBID: viewerFBID, viewerID: viewerID, fallbackMs: lastMs) else { continue }
+                    if latestSnippet.isEmpty {
+                        latestSnippet = message.text.isEmpty ? message.kind.label : message.text
+                    }
+                    messages.append(message)
                 }
-                guard let message = directMessage(node, viewerFBID: viewerFBID, viewerID: viewerID, fallbackMs: lastMs) else { continue }
-                if latestSnippet.isEmpty {
-                    latestSnippet = message.text.isEmpty ? message.kind.label : message.text
-                }
-                messages.append(message)
             }
         }
 
@@ -694,13 +735,14 @@ enum IGJSON {
             threadFBID: fbid,
             title: title,
             users: participants,
-            isGroup: bool(dict["is_group"]) ?? (participants.count > 1),
-            isPinned: isPinnedOverride ?? (bool(dict["is_pin"]) ?? false),
-            isUnread: bool(dict["marked_as_unread"]) ?? false,
+            isGroup: bool(dict["is_group"]) ?? fallbackThread?.isGroup ?? (participants.count > 1),
+            isPinned: isPinnedOverride ?? (bool(dict["is_pin"]) ?? fallbackThread?.isPinned ?? false),
+            isUnread: bool(dict["marked_as_unread"]) ?? fallbackThread?.isUnread ?? false,
             lastActivityAt: lastDate,
             snippet: latestSnippet,
             viewerFBID: viewerFBID,
-            messages: messages
+            messages: messages,
+            hasOlderMessages: hasOlderMessages
         )
     }
 

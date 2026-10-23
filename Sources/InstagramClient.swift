@@ -14,6 +14,7 @@ protocol InstagramTransport: AnyObject {
     func withPage<T>(_ purpose: String, _ body: () async throws -> T) async rethrows -> T
     @discardableResult func navigate(to path: String) async -> String?
     func scrollToBottom() async
+    @discardableResult func scrollDirectThreadToTop() async -> Bool
     func openDirectThread(ids: [String]) async -> String?
     func sendDirectMessage(text: String, threadPathID: String) async -> Bool
     func performMessageAction(_ action: String, messageText: String, emoji: String?, threadPathID: String) async -> Bool
@@ -401,6 +402,12 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     /// Scrolls the page to its end, which makes instagram.com load the next page of whatever grid it shows.
     func scrollToBottom() async {
         _ = await callBridge("scrollToBottom()")
+    }
+
+    /// Triggers pagination of older messages in the currently open Direct thread.
+    @discardableResult
+    func scrollDirectThreadToTop() async -> Bool {
+        (await callBridge("scrollThreadToTop()") as? Bool) ?? false
     }
 
     func currentPath() async -> String? {

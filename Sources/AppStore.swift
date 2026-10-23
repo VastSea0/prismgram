@@ -95,6 +95,7 @@ final class AppStore {
     var selectedThreadID: String?
     private(set) var isSendingDirectMessage = false
     private var sendChain: Task<Void, Never>?
+    private var loadingOlderThreadIDs: Set<String> = []
     /// A short message shown over the conversation when an action could not be completed.
     var directNotice: String?
     /// An instagram.com page shown in the in-app browser sheet (settings, shared links).
@@ -224,8 +225,15 @@ final class AppStore {
                 if !parsed.isEmpty { profileHighlights = parsed }
             }
 
-        case "IGDThreadDetailQuery":
-            if let detailed = IGJSON.directThreadDetail(from: json) {
+        case "IGDThreadDetailQuery",
+             "IGDMessageListOffMsysQuery",
+             "IGDMessageListAnchorMessageRangeBeforeOffMsysQuery",
+             "IGDMessageListAnchorMessageRangeAfterOffMsysQuery":
+            if let detailed = IGJSON.directThreadDetail(
+                from: json,
+                fallbackThread: selectedThread,
+                viewerID: viewerID ?? ""
+            ) {
                 mergeDetailedThread(detailed)
             }
 
@@ -264,6 +272,7 @@ final class AppStore {
             if let prev = existingByID[item.id] ?? directThreads.first(where: { $0.threadFBID == item.threadFBID }) {
                 if item.messages.count < prev.messages.count {
                     item.messages = prev.messages
+                    item.hasOlderMessages = prev.hasOlderMessages
                 }
             }
             ordered.append(item)
@@ -278,9 +287,16 @@ final class AppStore {
             if !detailed.messages.isEmpty {
                 // Keep messages still being sent, or that failed, until the server's copy replaces them.
                 let local = updated.messages.filter { $0.delivery != .sent && $0.id.hasPrefix("local-") }
+                let existingSent = updated.messages.filter { !$0.id.hasPrefix("local-") }
+                var byID: [String: IGDirectMessage] = Dictionary(uniqueKeysWithValues: existingSent.map { ($0.id, $0) })
+                for msg in detailed.messages {
+                    byID[msg.id] = msg
+                }
+                let mergedSent = byID.values.sorted { $0.timestamp < $1.timestamp }
                 let confirmed = Set(detailed.messages.filter(\.isFromViewer).map(\.text))
-                updated.messages = detailed.messages + local.filter { $0.delivery == .failed || !confirmed.contains($0.text) }
+                updated.messages = mergedSent + local.filter { $0.delivery == .failed || !confirmed.contains($0.text) }
             }
+            updated.hasOlderMessages = detailed.hasOlderMessages
             if !detailed.snippet.isEmpty {
                 updated.snippet = detailed.snippet
             }
@@ -660,6 +676,31 @@ final class AppStore {
             // Opening it in the hidden page is what loads its messages (tapped IGDThreadDetailQuery).
             await client.withPage("open thread") {
                 _ = await client.openDirectThread(ids: [thread.threadFBID, thread.id])
+            }
+        }
+    }
+
+    func isLoadingOlderMessages(in thread: IGDirectThread) -> Bool {
+        loadingOlderThreadIDs.contains(thread.id)
+    }
+
+    /// Scrolls the hidden thread view to its top boundary so Relay fetches the previous page of messages.
+    func loadOlderMessages(in thread: IGDirectThread) async {
+        guard thread.hasOlderMessages, !loadingOlderThreadIDs.contains(thread.id) else { return }
+        loadingOlderThreadIDs.insert(thread.id)
+        defer { loadingOlderThreadIDs.remove(thread.id) }
+
+        let beforeCount = directThreads.first(where: { $0.id == thread.id })?.messages.count ?? thread.messages.count
+        await client.withPage("load older messages") {
+            guard await client.openDirectThread(ids: [thread.threadFBID, thread.id]) != nil else { return }
+            _ = await client.scrollDirectThreadToTop()
+            for attempt in 0..<14 {
+                try? await Task.sleep(for: .milliseconds(250))
+                let currentCount = directThreads.first(where: { $0.id == thread.id })?.messages.count ?? 0
+                if currentCount > beforeCount { break }
+                if attempt == 5 {
+                    _ = await client.scrollDirectThreadToTop()
+                }
             }
         }
     }

@@ -8,7 +8,7 @@ import Foundation
 /// Web Inspector (the view is inspectable) and call e.g. `await __prismgram.currentPath()`.
 enum BridgeScripts {
     /// Bump when the bridge's methods or results change shape.
-    static let version = 4
+    static let version = 5
 
     /// Installs `window.__prismgram` unless it already exists. Injected at document start and
     /// prepended to calls (see `InstagramClient.callBridge`) in case the page replaced its window.
@@ -152,6 +152,62 @@ enum BridgeScripts {
                 main.scrollTo(0, main.scrollHeight);
                 window.dispatchEvent(new Event('scroll'));
                 return true;
+            },
+
+            /// Triggers loading of older messages in the open `/direct/t/<id>/` thread by invoking
+            /// Relay's boundary scroll trigger and scrolling the `column-reverse` message list to its top edge.
+            scrollThreadToTop() {
+                const root = document.querySelector('[data-pagelet="IGDMessagesList"]')
+                    || document.querySelector('div[role="main"]')
+                    || document.body;
+                let scroller = null;
+                const candidates = Array.from(root.querySelectorAll('div'));
+                for (const el of candidates) {
+                    const st = getComputedStyle(el);
+                    if ((st.overflowY === 'scroll' || st.overflowY === 'auto') && (st.flexDirection === 'column-reverse' || el.scrollHeight > el.clientHeight)) {
+                        scroller = el;
+                        if (st.flexDirection === 'column-reverse') { break; }
+                    }
+                }
+                let triggered = false;
+                const startNode = scroller || root;
+                const fiberKey = Object.keys(startNode).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                if (fiberKey) {
+                    const visited = new Set();
+                    const queue = [startNode[fiberKey]];
+                    let curr = startNode[fiberKey];
+                    for (let i = 0; i < 10 && curr; i++) {
+                        if (curr.return) { queue.push(curr.return); }
+                        curr = curr.return;
+                    }
+                    let steps = 0;
+                    while (queue.length > 0 && steps < 450) {
+                        steps++;
+                        const f = queue.shift();
+                        if (!f || visited.has(f)) { continue; }
+                        visited.add(f);
+                        const p = f.memoizedProps;
+                        if (p) {
+                            if (typeof p.onLoadMoreAboveExternal === 'function' && p.hasMoreAbove && !p.isLoadingAbove) {
+                                try { p.onLoadMoreAboveExternal(); triggered = true; break; } catch (_) {}
+                            }
+                            if (typeof p.onLoadMore === 'function' && p.hasMore && !p.isLoading && p.rootMargin) {
+                                try { p.onLoadMore(); triggered = true; break; } catch (_) {}
+                            }
+                        }
+                        if (f.child) { queue.push(f.child); }
+                        if (f.sibling) { queue.push(f.sibling); }
+                    }
+                }
+                if (scroller) {
+                    scroller.scrollTop = -scroller.scrollHeight;
+                    const first = scroller.firstElementChild?.firstElementChild || scroller.firstElementChild;
+                    if (first && first.scrollIntoView) {
+                        first.scrollIntoView({ block: 'start' });
+                    }
+                    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+                }
+                return triggered || !!scroller;
             },
 
             currentPath() {
