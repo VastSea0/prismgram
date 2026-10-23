@@ -43,6 +43,8 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     private let hostWindow: NSWindow
     private var isReady = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isLeaseHeld = false
+    private var leaseQueue: [CheckedContinuation<Void, Never>] = []
 
     override init() {
         let controller = WKUserContentController()
@@ -239,6 +241,54 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
         }
         return Response(status: status, json: json)
+    }
+
+    // MARK: Page lease
+
+    /// Runs `body` with exclusive use of the hidden page's location.
+    ///
+    /// There is one page, so anything that navigates, scrolls or types in it (and then waits for the
+    /// page's own queries) must not overlap with another such flow, or one would carry the page away
+    /// from under the other. Callers queue in FIFO order. Plain `request(_:)` calls don't depend on
+    /// the page's address and must not take the lease. Not reentrant: never nest `withPage` calls.
+    func withPage<T>(_ purpose: String, _ body: () async throws -> T) async rethrows -> T {
+        let queuedAt = ContinuousClock.now
+        await acquireLease()
+        let acquiredAt = ContinuousClock.now
+        Self.debugLog("lease acquired: \(purpose) (waited \(Self.milliseconds(acquiredAt - queuedAt)) ms)")
+        defer {
+            Self.debugLog("lease released: \(purpose) (held \(Self.milliseconds(ContinuousClock.now - acquiredAt)) ms)")
+            releaseLease()
+        }
+        return try await body()
+    }
+
+    private func acquireLease() async {
+        guard isLeaseHeld else {
+            isLeaseHeld = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            leaseQueue.append(continuation)
+        }
+    }
+
+    private func releaseLease() {
+        if leaseQueue.isEmpty {
+            isLeaseHeld = false
+        } else {
+            // Ownership passes straight to the next waiter; the lease stays held.
+            leaseQueue.removeFirst().resume()
+        }
+    }
+
+    static func debugLog(_ message: @autoclosure () -> String) {
+        guard isDebugging else { return }
+        FileHandle.standardError.write(Data("[prismgram] \(message())\n".utf8))
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        Int(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
 
     // MARK: Driving the page

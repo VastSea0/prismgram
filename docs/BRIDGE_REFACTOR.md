@@ -59,13 +59,13 @@ Known problems this plan fixes:
 Do them in order; each depends on the previous ones.
 
 ### T1 — Serialize use of the hidden page
-- [ ] Add a `PageLease`-style serializer in `InstagramClient` (FIFO async mutex on the main
+- [x] Add a `PageLease`-style serializer in `InstagramClient` (FIFO async mutex on the main
       actor): `func withPage<T>(_ purpose: String, _ body: () async throws -> T) async rethrows -> T`.
-- [ ] Route every flow that navigates/scrolls/types through it in `AppStore`: story open
+- [x] Route every flow that navigates/scrolls/types through it in `AppStore`: story open
       (`navigate("/stories/...")`), direct inbox (`navigate("/direct/inbox/")`), open thread +
       send, react, reply, profile loading (`navigate("/<user>/")`, section paths, `scrollToBottom`).
       Plain `request()` calls must NOT take the lease (they don't depend on the page URL).
-- [ ] `PRISMGRAM_DEBUG` logs lease acquire/release with the purpose and wait time.
+- [x] `PRISMGRAM_DEBUG` logs lease acquire/release with the purpose and wait time.
 
 ### T2 — Real readiness signal
 - [ ] Extend the document-start script to post an `igReady` message once the SPA has booted
@@ -118,3 +118,4 @@ Do them in order; each depends on the previous ones.
 Append newest at the bottom: `YYYY-MM-DD HH:MM — <agent> — <task> — <what was done>. NEXT: ...`
 
 - 2026-10-23 11:05 — Antigravity — setup — Plan written; baseline `swift build` passes. NEXT: T1.
+- 2026-10-23 11:06 — Antigravity — T1 — `InstagramClient.withPage` (FIFO, non-reentrant) wraps story fallback, inbox, open/send/react/reply, profile open and section/scroll loads; stale profile tokens are rechecked after acquiring. Manual check: open a profile while a DM is sending; both should complete. NEXT: T2.

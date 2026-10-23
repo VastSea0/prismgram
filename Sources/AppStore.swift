@@ -548,10 +548,13 @@ final class AppStore {
         }
 
         guard !tray.id.hasPrefix("highlight:") else { return }
-        _ = await client.navigate(to: "/stories/\(tray.user.username)/")
-        for _ in 0..<12 {
-            try? await Task.sleep(for: .milliseconds(350))
-            if !latest(tray).slides.isEmpty { break }
+        await client.withPage("story \(tray.id)") {
+            guard latest(tray).slides.isEmpty else { return }
+            _ = await client.navigate(to: "/stories/\(tray.user.username)/")
+            for _ in 0..<12 {
+                try? await Task.sleep(for: .milliseconds(350))
+                if !latest(tray).slides.isEmpty { break }
+            }
         }
     }
 
@@ -656,14 +659,17 @@ final class AppStore {
     func loadDirect() async {
         guard directPhase != .loading else { return }
         directPhase = .loading
-        _ = await client.navigate(to: "/direct/inbox/")
-
-        for _ in 0..<24 {
-            try? await Task.sleep(for: .milliseconds(400))
-            if !directThreads.isEmpty {
-                directPhase = .loaded
-                return
+        let loaded = await client.withPage("direct inbox") { () async -> Bool in
+            _ = await client.navigate(to: "/direct/inbox/")
+            for _ in 0..<24 {
+                try? await Task.sleep(for: .milliseconds(400))
+                if !directThreads.isEmpty { return true }
             }
+            return false
+        }
+        if loaded {
+            directPhase = .loaded
+            return
         }
         if directPhase == .loading {
             directPhase = directThreads.isEmpty ? .failed("Mesaj kutusu yüklenemedi. Yeniden deneyin.") : .loaded
@@ -682,7 +688,9 @@ final class AppStore {
         }
         Task {
             // Opening it in the hidden page is what loads its messages (tapped IGDThreadDetailQuery).
-            _ = await client.openDirectThread(ids: [thread.threadFBID, thread.id])
+            await client.withPage("open thread") {
+                _ = await client.openDirectThread(ids: [thread.threadFBID, thread.id])
+            }
         }
     }
 
@@ -736,8 +744,10 @@ final class AppStore {
                 return true
             }
         }
-        guard let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) else { return false }
-        return await client.sendDirectMessage(text: text, threadPathID: pathID)
+        return await client.withPage("send message") {
+            guard let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) else { return false }
+            return await client.sendDirectMessage(text: text, threadPathID: pathID)
+        }
     }
 
     /// Calls a `direct_v2/threads/broadcast/<kind>/` endpoint and returns its payload when Instagram answers `ok`.
@@ -785,8 +795,11 @@ final class AppStore {
                     ]) != nil
                 }
             }
-            if !done, !message.text.isEmpty, let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) {
-                done = await client.performMessageAction("react", messageText: message.text, emoji: emoji, threadPathID: pathID)
+            if !done, !message.text.isEmpty {
+                done = await client.withPage("react") {
+                    guard let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]) else { return false }
+                    return await client.performMessageAction("react", messageText: message.text, emoji: emoji, threadPathID: pathID)
+                }
             }
             if !done {
                 updateMessage(message.id, in: thread.id) { $0.reactions = previous }
@@ -834,10 +847,13 @@ final class AppStore {
                     ]) != nil
                 }
             }
-            if !sent, !target.text.isEmpty, let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]),
-               await client.performMessageAction("reply", messageText: target.text, emoji: nil, threadPathID: pathID) {
-                try? await Task.sleep(for: .milliseconds(250))
-                sent = await client.sendDirectMessage(text: trimmed, threadPathID: pathID)
+            if !sent, !target.text.isEmpty {
+                sent = await client.withPage("reply") {
+                    guard let pathID = await client.openDirectThread(ids: [thread.threadFBID, thread.id]),
+                          await client.performMessageAction("reply", messageText: target.text, emoji: nil, threadPathID: pathID) else { return false }
+                    try? await Task.sleep(for: .milliseconds(250))
+                    return await client.sendDirectMessage(text: trimmed, threadPathID: pathID)
+                }
             }
             setDelivery(sent ? .sent : .failed, for: message.id, in: thread.id)
             if !sent { withAnimation { directNotice = "Yanıt gönderilemedi" } }
@@ -1014,15 +1030,20 @@ final class AppStore {
     /// late response for another profile is ignored). The posts and highlights queries that come with it
     /// fill the grid and the highlights row as they arrive.
     private func openProfilePage(username: String, token: UUID) async -> IGUser? {
-        pageProfileTarget = username.lowercased()
-        pageProfileUser = nil
-        capture = .posts
-        _ = await client.navigate(to: "/\(username)/")
-        for _ in 0..<60 {
-            try? await Task.sleep(for: .milliseconds(250))
-            guard token == profileToken else { return nil }
-            if pageProfileUser != nil && profileGrids[.posts]?.phase == .loaded { break }
+        await client.withPage("profile \(username)") {
+            // Another flow may have held the page meanwhile; this request may already be stale.
+            guard token == profileToken else { return }
+            pageProfileTarget = username.lowercased()
+            pageProfileUser = nil
+            capture = .posts
+            _ = await client.navigate(to: "/\(username)/")
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard token == profileToken else { return }
+                if pageProfileUser != nil && profileGrids[.posts]?.phase == .loaded { break }
+            }
         }
+        guard token == profileToken else { return nil }
         if pageProfileUser != nil, profileGrids[.posts] == nil {
             // The posts query never came (private account, or still on its way): show an empty, finished grid.
             profileGrids[.posts] = PostPage(phase: .loaded)
@@ -1059,21 +1080,26 @@ final class AppStore {
             guard page.cursor != nil, !page.isLoadingMore, page.phase == .loaded, capture == section || section == .posts else { return }
             page.isLoadingMore = true
             profileGrids[section] = page
-            capture = section
-            await client.scrollToBottom()
         } else {
             guard page.phase != .loading else { return }
             profileGrids[section] = PostPage(phase: .loading)
-            capture = section
-            _ = await client.navigate(to: section.path(for: user.username))
         }
 
-        for _ in 0..<(more ? 24 : 40) {
-            try? await Task.sleep(for: .milliseconds(250))
+        await client.withPage("profile \(section) \(more ? "more" : "first")") {
             guard token == profileToken else { return }
-            let current = profileGrids[section] ?? PostPage()
-            if current.items.count > (more ? before : 0) { break }
-            if !more, current.phase == .loaded { break }
+            capture = section
+            if more {
+                await client.scrollToBottom()
+            } else {
+                _ = await client.navigate(to: section.path(for: user.username))
+            }
+            for _ in 0..<(more ? 24 : 40) {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard token == profileToken else { return }
+                let current = profileGrids[section] ?? PostPage()
+                if current.items.count > (more ? before : 0) { break }
+                if !more, current.phase == .loaded { break }
+            }
         }
         guard token == profileToken else { return }
         var updated = profileGrids[section] ?? PostPage()
