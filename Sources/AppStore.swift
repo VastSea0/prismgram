@@ -414,9 +414,9 @@ final class AppStore {
                     viewerUsername = ownTray.user.username
                 }
             }
-            let json = try await run { try await $0.timeline() }
-            feed = Self.feedPosts(from: json)
-            feedCursor = IGJSON.string(json["next_max_id"])
+            let page = try await run { try await $0.timeline() }
+            feed = page.posts
+            feedCursor = page.nextCursor
             feedPhase = .loaded
             if viewerUsername == nil, let detected = await client.detectViewerUsername() {
                 viewerUsername = detected
@@ -431,21 +431,12 @@ final class AppStore {
         isLoadingMoreFeed = true
         defer { isLoadingMoreFeed = false }
         do {
-            let json = try await run { try await $0.timeline(cursor: cursor) }
+            let page = try await run { try await $0.timeline(cursor: cursor) }
             let known = Set(feed.map(\.id))
-            feed += Self.feedPosts(from: json).filter { !known.contains($0.id) }
-            feedCursor = IGJSON.string(json["next_max_id"])
+            feed += page.posts.filter { !known.contains($0.id) }
+            feedCursor = page.nextCursor
         } catch {
             feedCursor = nil
-        }
-    }
-
-    private static func feedPosts(from json: [String: Any]) -> [IGPost] {
-        let wrappers = (json["feed_items"] as? [[String: Any]]) ?? []
-        return wrappers.compactMap { wrapper in
-            guard let media = wrapper["media_or_ad"] as? [String: Any],
-                  media["ad_id"] == nil, media["injected"] == nil else { return nil }
-            return IGJSON.post(media)
         }
     }
 

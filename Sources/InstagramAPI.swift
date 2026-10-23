@@ -14,14 +14,14 @@ struct InstagramAPI {
         try await fetch("/api/v1/feed/reels_tray/")
     }
 
-    func timeline(cursor: String? = nil) async throws -> [String: Any] {
+    func timeline(cursor: String? = nil) async throws -> APITimelineResponse {
         let body: String
         if let cursor {
             body = "reason=pagination&is_pull_to_refresh=0&max_id=\(Self.encode(cursor))"
         } else {
             body = "reason=cold_start_fetch&is_pull_to_refresh=0"
         }
-        return try await fetch("/api/v1/feed/timeline/", method: "POST", body: body)
+        return try await fetchDecoded(APITimelineResponse.self, "/api/v1/feed/timeline/", method: "POST", body: body)
     }
 
     func reelsMedia(reelID: String) async throws -> [String: Any] {
@@ -168,7 +168,32 @@ struct InstagramAPI {
         case rejected(String)
     }
 
+    private func fetchDecoded<T: Decodable>(_ type: T.Type, _ path: String, method: String = "GET", body: String? = nil) async throws -> T {
+        let response = try await rawFetch(path, method: method, body: body)
+        let data: Data
+        if let rawData = response.data {
+            data = rawData
+        } else if let json = response.json, let serialized = try? JSONSerialization.data(withJSONObject: json) {
+            data = serialized
+        } else {
+            throw Failure.rejected("Instagram isteği reddetti (HTTP \(response.status)).")
+        }
+        do {
+            return try APIDecoding.decode(T.self, from: data, endpoint: path)
+        } catch {
+            throw Failure.rejected("Instagram yanıtı okunamadı.")
+        }
+    }
+
     private func fetch(_ path: String, method: String = "GET", body: String? = nil) async throws -> [String: Any] {
+        let response = try await rawFetch(path, method: method, body: body)
+        guard let json = response.json else {
+            throw Failure.rejected("Instagram isteği reddetti (HTTP \(response.status)).")
+        }
+        return json
+    }
+
+    private func rawFetch(_ path: String, method: String = "GET", body: String? = nil) async throws -> InstagramClient.Response {
         let response: InstagramClient.Response
         do {
             response = try await transport.request(path, method: method, body: body)
@@ -182,7 +207,7 @@ struct InstagramAPI {
         if response.status == 429 {
             throw Failure.rejected("Instagram istekleri geçici olarak sınırladı. Birkaç dakika sonra yenileyin.")
         }
-        guard (200..<300).contains(response.status), let json = response.json else {
+        guard (200..<300).contains(response.status), response.json != nil else {
             let detail = (response.json?["message"] as? String) ?? (response.json == nil ? "non-JSON body" : "-")
             InstagramClient.debugLog("rejected \(path): \(detail)")
             let reason = (response.json?["feedback_message"] as? String)
@@ -190,7 +215,7 @@ struct InstagramAPI {
                 ?? "Instagram isteği reddetti (HTTP \(response.status))."
             throw Failure.rejected(reason)
         }
-        return json
+        return response
     }
 
     static func encode(_ text: String) -> String {

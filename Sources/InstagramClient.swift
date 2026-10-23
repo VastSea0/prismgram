@@ -34,7 +34,14 @@ extension InstagramTransport {
 final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport {
     struct Response {
         let status: Int
+        let data: Data?
         let json: [String: Any]?
+
+        init(status: Int, data: Data? = nil, json: [String: Any]? = nil) {
+            self.status = status
+            self.data = data
+            self.json = json
+        }
     }
 
     struct NetworkEvent {
@@ -60,7 +67,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
     static let appID = "936619743392459"
     static let asbdID = "129477"
     /// `PRISMGRAM_DEBUG=1` logs each request's path and HTTP status (never bodies) to standard error.
-    static let isDebugging = ProcessInfo.processInfo.environment["PRISMGRAM_DEBUG"] != nil
+    nonisolated static let isDebugging = ProcessInfo.processInfo.environment["PRISMGRAM_DEBUG"] != nil
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
     private static let engineSize = NSSize(width: 1100, height: 900)
 
@@ -280,11 +287,13 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
             throw ClientError.badEnvelope
         }
 
+        var bodyData: Data?
         var json: [String: Any]?
-        if let bodyText = envelope["body"] as? String, let bodyData = bodyText.data(using: .utf8) {
-            json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
+        if let bodyText = envelope["body"] as? String, let data = bodyText.data(using: .utf8) {
+            bodyData = data
+            json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
-        return Response(status: status, json: json)
+        return Response(status: status, data: bodyData, json: json)
     }
 
     // MARK: Page lease
@@ -326,7 +335,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate, InstagramTransport 
         }
     }
 
-    static func debugLog(_ message: @autoclosure () -> String) {
+    nonisolated static func debugLog(_ message: @autoclosure () -> String) {
         guard isDebugging else { return }
         FileHandle.standardError.write(Data("[prismgram] \(message())\n".utf8))
     }
