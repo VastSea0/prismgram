@@ -134,6 +134,7 @@ private struct StoryCanvas: View {
     @State private var isMediaReady = false
     @State private var isMuted = false
     @State private var pressStart: Date?
+    @State private var isShowingViewers = false
     @FocusState private var isFocused: Bool
 
     init(tray: IGStoryTray, store: AppStore, isPhone: Bool, onLeaveTray: @escaping (Int) -> Void) {
@@ -320,9 +321,9 @@ private struct StoryCanvas: View {
                                 VerifiedBadge(size: 11)
                             }
                             if let date = slide?.takenAt {
-                                Text(date.igAge)
-                                    .font(.system(size: 13.5))
-                                    .foregroundStyle(.white.opacity(0.7))
+                                Text("\(date.igAge) · \(date.formatted(date: .omitted, time: .shortened))")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.white.opacity(0.75))
                             }
                         }
                     }
@@ -378,7 +379,119 @@ private struct StoryCanvas: View {
             )
 
             Spacer()
+
+            if let slide, tray.user.id == store.viewerID || slide.viewerCount != nil || !slide.viewers.isEmpty {
+                let count = slide.viewerCount ?? slide.viewers.count
+                HStack {
+                    Button {
+                        clock.isPaused = true
+                        isShowingViewers = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            if !slide.viewers.isEmpty {
+                                HStack(spacing: -8) {
+                                    ForEach(slide.viewers.prefix(3)) { viewer in
+                                        AvatarView(url: viewer.avatarURL, size: 24)
+                                            .overlay(Circle().strokeBorder(.black, lineWidth: 1.5))
+                                    }
+                                }
+                            } else {
+                                Image(systemName: "eye.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            Text("\(count) görüntüleme")
+                                .font(.system(size: 13, weight: .semibold))
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.75))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(.black.opacity(0.45)))
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $isShowingViewers, arrowEdge: .bottom) {
+                        storyViewersPopover(slide: slide, count: count)
+                    }
+                    .onChange(of: isShowingViewers) { _, showing in
+                        clock.isPaused = showing
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, isPhone ? 18 : 14)
+                .background(
+                    LinearGradient(colors: [.clear, .black.opacity(0.45)], startPoint: .top, endPoint: .bottom)
+                        .allowsHitTesting(false)
+                )
+            }
         }
+    }
+
+    private func storyViewersPopover(slide: IGMediaItem, count: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("\(count) görüntüleme", systemImage: "eye.fill")
+                    .font(.system(size: 13.5, weight: .semibold))
+                Spacer()
+                if let date = slide.takenAt {
+                    Text(date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            if slide.viewers.isEmpty {
+                Text(count > 0 ? "İzleyen listesi bu hikaye için kullanılamıyor." : "Henüz kimse görüntülemedi.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(slide.viewers) { viewer in
+                            Button {
+                                isShowingViewers = false
+                                store.openProfile(of: viewer)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    AvatarView(url: viewer.avatarURL, size: 34)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        HStack(spacing: 4) {
+                                            Text(viewer.username)
+                                                .font(.system(size: 13, weight: .semibold))
+                                            if viewer.isVerified {
+                                                VerifiedBadge(size: 11)
+                                            }
+                                        }
+                                        if !viewer.fullName.isEmpty {
+                                            Text(viewer.fullName)
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 280)
+            }
+        }
+        .frame(width: 280)
     }
 
     private func chromeButton(_ symbol: String, action: @escaping () -> Void) -> some View {

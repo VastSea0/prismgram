@@ -187,6 +187,9 @@ struct IGMediaItem: Identifiable, Hashable, Sendable {
     var takenAt: Date? = nil
     /// Seconds, for videos.
     var duration: Double? = nil
+    /// Story viewer count and viewers list (present on the signed-in viewer's own stories).
+    var viewerCount: Int? = nil
+    var viewers: [IGUser] = []
 }
 
 struct IGPost: Identifiable, Hashable, Sendable {
@@ -451,6 +454,10 @@ enum IGJSON {
         let height = double(dict["original_height"]) ?? 0
         let ratio = (width > 0 && height > 0) ? min(max(width / height, 0.56), 1.91) : 1.0
 
+        let rawViewers = (dict["viewers"] as? [[String: Any]]) ?? []
+        let viewers = rawViewers.compactMap(user)
+        let viewerCount = int(dict["total_viewer_count"]) ?? int(dict["viewer_count"]) ?? (viewers.isEmpty ? nil : viewers.count)
+
         return IGMediaItem(
             id: string(dict["pk"]) ?? string(dict["id"]) ?? UUID().uuidString,
             thumbURL: thumb ?? full,
@@ -458,7 +465,9 @@ enum IGJSON {
             videoURL: video,
             aspectRatio: ratio,
             takenAt: double(dict["taken_at"]).map { Date(timeIntervalSince1970: $0) },
-            duration: double(dict["video_duration"])
+            duration: double(dict["video_duration"]),
+            viewerCount: viewerCount,
+            viewers: viewers
         )
     }
 

@@ -233,6 +233,9 @@ struct APIMedia: Decodable {
     let play_count: FlexInt?
     let ig_play_count: FlexInt?
     let view_count: FlexInt?
+    let total_viewer_count: FlexInt?
+    let viewer_count: FlexInt?
+    let viewers: LossyArray<APIUser>?
     let timeline_pinned_user_ids: [FlexString]?
     let ad_id: FlexString?
     let injected: AnyObjectMarker?
@@ -270,6 +273,10 @@ struct APIMedia: Decodable {
         let height = original_height?.value ?? 0
         let ratio = (width > 0 && height > 0) ? min(max(width / height, 0.56), 1.91) : 1.0
 
+        let parsedViewers = (viewers?.elements ?? []).compactMap(\.domainModel)
+        let resolvedViewerCount = (total_viewer_count ?? viewer_count)?.value
+            ?? (parsedViewers.isEmpty ? nil : parsedViewers.count)
+
         return IGMediaItem(
             id: (pk ?? id)?.value ?? UUID().uuidString,
             thumbURL: thumb ?? full,
@@ -277,7 +284,9 @@ struct APIMedia: Decodable {
             videoURL: video,
             aspectRatio: ratio,
             takenAt: taken_at.map { Date(timeIntervalSince1970: $0.value) },
-            duration: video_duration?.value
+            duration: video_duration?.value,
+            viewerCount: resolvedViewerCount,
+            viewers: parsedViewers
         )
     }
 
