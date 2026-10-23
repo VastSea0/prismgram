@@ -555,9 +555,9 @@ final class AppStore {
         guard reelsPhase != .loading else { return }
         reelsPhase = .loading
         do {
-            let json = try await run { try await $0.clipsDiscover() }
-            reels = IGJSON.collectPosts(in: json).filter(\.isVideo)
-            reelsCursor = Self.reelsCursor(json)
+            let page = try await run { try await $0.clipsDiscover() }
+            reels = page.videos
+            reelsCursor = page.nextCursor
             reelsPhase = .loaded
         } catch {
             reelsPhase = .failed(message(for: error))
@@ -569,19 +569,13 @@ final class AppStore {
         isLoadingMoreReels = true
         defer { isLoadingMoreReels = false }
         do {
-            let json = try await run { try await $0.clipsDiscover(cursor: cursor) }
+            let page = try await run { try await $0.clipsDiscover(cursor: cursor) }
             let known = Set(reels.map(\.id))
-            reels += IGJSON.collectPosts(in: json).filter { $0.isVideo && !known.contains($0.id) }
-            reelsCursor = Self.reelsCursor(json)
+            reels += page.videos.filter { !known.contains($0.id) }
+            reelsCursor = page.nextCursor
         } catch {
             reelsCursor = nil
         }
-    }
-
-    private static func reelsCursor(_ json: [String: Any]) -> String? {
-        let paging = json["paging_info"] as? [String: Any]
-        guard IGJSON.bool(paging?["more_available"]) ?? false else { return nil }
-        return IGJSON.string(paging?["max_id"])
     }
 
     struct SearchResults {

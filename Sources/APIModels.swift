@@ -452,3 +452,29 @@ struct APIExploreResponse: Decodable {
         self.posts = try APIMediaTree(from: decoder).posts
     }
 }
+
+struct APIClipsDiscoverResponse: Decodable {
+    let videos: [IGPost]
+    let nextCursor: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case paging_info
+    }
+
+    private struct PagingInfo: Decodable {
+        let more_available: FlexBool?
+        let max_id: FlexString?
+    }
+
+    init(from decoder: Decoder) throws {
+        let allPosts = try APIMediaTree(from: decoder).posts
+        self.videos = allPosts.filter(\.isVideo)
+        let container = try? decoder.container(keyedBy: CodingKeys.self)
+        if let paging = try? container?.decode(PagingInfo.self, forKey: .paging_info),
+           paging.more_available?.value == true {
+            self.nextCursor = paging.max_id?.value
+        } else {
+            self.nextCursor = nil
+        }
+    }
+}

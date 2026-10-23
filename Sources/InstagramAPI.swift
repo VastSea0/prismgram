@@ -39,12 +39,12 @@ struct InstagramAPI {
         return decoded.posts
     }
 
-    func clipsDiscover(cursor: String? = nil) async throws -> [String: Any] {
+    func clipsDiscover(cursor: String? = nil) async throws -> APIClipsDiscoverResponse {
         var body = "page_size=8&include_feed_video=true"
         if let cursor {
             body += "&max_id=\(Self.encode(cursor))"
         }
-        return try await fetch("/api/v1/clips/discover/", method: "POST", body: body)
+        return try await fetchDecoded(APIClipsDiscoverResponse.self, "/api/v1/clips/discover/", method: "POST", body: body)
     }
 
     func topSearch(query: String) async throws -> [String: Any] {
