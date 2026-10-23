@@ -190,6 +190,7 @@ struct IGMediaItem: Identifiable, Hashable, Sendable {
     /// Story viewer count and viewers list (present on the signed-in viewer's own stories).
     var viewerCount: Int? = nil
     var viewers: [IGUser] = []
+    var likedViewerIDs: Set<String> = []
 }
 
 struct IGPost: Identifiable, Hashable, Sendable {
@@ -454,9 +455,28 @@ enum IGJSON {
         let height = double(dict["original_height"]) ?? 0
         let ratio = (width > 0 && height > 0) ? min(max(width / height, 0.56), 1.91) : 1.0
 
-        let rawViewers = (dict["viewers"] as? [[String: Any]]) ?? []
-        let viewers = rawViewers.compactMap(user)
-        let viewerCount = int(dict["total_viewer_count"]) ?? int(dict["viewer_count"]) ?? (viewers.isEmpty ? nil : viewers.count)
+        let rawViewers = (dict["viewers"] as? [[String: Any]])
+            ?? (dict["users"] as? [[String: Any]])
+            ?? (((dict["edge_story_media_viewers"] as? [String: Any])?["edges"] as? [[String: Any]])?.compactMap { $0["node"] as? [String: Any] })
+            ?? []
+        var viewers: [IGUser] = []
+        var likedViewerIDs = Set<String>()
+        for entry in rawViewers {
+            let userDict = (entry["user"] as? [String: Any]) ?? entry
+            if let parsedUser = user(userDict) ?? graphUser(userDict) {
+                viewers.append(parsedUser)
+                if bool(entry["has_liked"]) == true {
+                    likedViewerIDs.insert(parsedUser.id)
+                }
+            }
+        }
+        let edgeCount = int((dict["edge_story_media_viewers"] as? [String: Any])?["count"])
+        let viewerCount = int(dict["total_viewer_count"])
+            ?? int(dict["viewer_count"])
+            ?? int(dict["user_count"])
+            ?? int(dict["fb_viewer_count"])
+            ?? edgeCount
+            ?? (viewers.isEmpty ? nil : viewers.count)
 
         return IGMediaItem(
             id: string(dict["pk"]) ?? string(dict["id"]) ?? UUID().uuidString,
@@ -467,7 +487,8 @@ enum IGJSON {
             takenAt: double(dict["taken_at"]).map { Date(timeIntervalSince1970: $0) },
             duration: double(dict["video_duration"]),
             viewerCount: viewerCount,
-            viewers: viewers
+            viewers: viewers,
+            likedViewerIDs: likedViewerIDs
         )
     }
 

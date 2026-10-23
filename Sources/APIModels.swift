@@ -210,6 +210,27 @@ struct APIMediaCandidate: Decodable {
     let height: FlexInt?
 }
 
+struct APIStoryViewerEntry: Decodable {
+    let user: APIUser?
+    let has_liked: FlexBool?
+
+    init(from decoder: Decoder) throws {
+        if let container = try? decoder.container(keyedBy: CodingKeys.self),
+           let nestedUser = try? container.decode(APIUser.self, forKey: .user) {
+            self.user = nestedUser
+            self.has_liked = try? container.decode(FlexBool.self, forKey: .has_liked)
+        } else {
+            self.user = try? APIUser(from: decoder)
+            self.has_liked = nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case user
+        case has_liked
+    }
+}
+
 struct APIMedia: Decodable {
     let pk: FlexString?
     let id: FlexString?
@@ -235,7 +256,10 @@ struct APIMedia: Decodable {
     let view_count: FlexInt?
     let total_viewer_count: FlexInt?
     let viewer_count: FlexInt?
-    let viewers: LossyArray<APIUser>?
+    let user_count: FlexInt?
+    let fb_viewer_count: FlexInt?
+    let viewers: LossyArray<APIStoryViewerEntry>?
+    let users: LossyArray<APIStoryViewerEntry>?
     let timeline_pinned_user_ids: [FlexString]?
     let ad_id: FlexString?
     let injected: AnyObjectMarker?
@@ -273,8 +297,20 @@ struct APIMedia: Decodable {
         let height = original_height?.value ?? 0
         let ratio = (width > 0 && height > 0) ? min(max(width / height, 0.56), 1.91) : 1.0
 
-        let parsedViewers = (viewers?.elements ?? []).compactMap(\.domainModel)
-        let resolvedViewerCount = (total_viewer_count ?? viewer_count)?.value
+        let rawViewerEntries = (viewers?.elements ?? []) + (users?.elements ?? [])
+        var parsedViewers: [IGUser] = []
+        var likedIDs = Set<String>()
+        var seenIDs = Set<String>()
+        for entry in rawViewerEntries {
+            guard let domain = entry.user?.domainModel else { continue }
+            if seenIDs.insert(domain.id).inserted {
+                parsedViewers.append(domain)
+            }
+            if entry.has_liked?.value == true {
+                likedIDs.insert(domain.id)
+            }
+        }
+        let resolvedViewerCount = (total_viewer_count ?? viewer_count ?? user_count ?? fb_viewer_count)?.value
             ?? (parsedViewers.isEmpty ? nil : parsedViewers.count)
 
         return IGMediaItem(
@@ -286,7 +322,8 @@ struct APIMedia: Decodable {
             takenAt: taken_at.map { Date(timeIntervalSince1970: $0.value) },
             duration: video_duration?.value,
             viewerCount: resolvedViewerCount,
-            viewers: parsedViewers
+            viewers: parsedViewers,
+            likedViewerIDs: likedIDs
         )
     }
 
@@ -618,6 +655,49 @@ struct APIReelsMediaResponse: Decodable {
             return first.slides
         }
         return []
+    }
+}
+
+struct APIStoryViewersResponse: Decodable {
+    let users: LossyArray<APIStoryViewerEntry>?
+    let viewers: LossyArray<APIStoryViewerEntry>?
+    let total_viewer_count: FlexInt?
+    let user_count: FlexInt?
+    let viewer_count: FlexInt?
+    let updated_media: APIMedia?
+
+    var parsedViewers: (users: [IGUser], likedIDs: Set<String>, count: Int?) {
+        let entries = (viewers?.elements ?? []) + (users?.elements ?? [])
+        var list: [IGUser] = []
+        var liked = Set<String>()
+        var seen = Set<String>()
+        for entry in entries {
+            guard let domain = entry.user?.domainModel else { continue }
+            if seen.insert(domain.id).inserted {
+                list.append(domain)
+            }
+            if entry.has_liked?.value == true {
+                liked.insert(domain.id)
+            }
+        }
+        if let updated = updated_media?.mediaItem {
+            for viewer in updated.viewers where seen.insert(viewer.id).inserted {
+                list.append(viewer)
+            }
+            liked.formUnion(updated.likedViewerIDs)
+        }
+        let count = (total_viewer_count ?? user_count ?? viewer_count)?.value
+            ?? updated_media?.mediaItem?.viewerCount
+            ?? (list.isEmpty ? nil : list.count)
+        return (list, liked, count)
+    }
+}
+
+struct APIMediaInfoResponse: Decodable {
+    let items: LossyArray<APIMedia>?
+
+    var firstPost: IGPost? {
+        items?.elements.first?.post
     }
 }
 

@@ -11,6 +11,7 @@ struct StoryViewer: View {
     @Bindable var store: AppStore
     @State private var forward = true
     @State private var dragOffset: CGFloat = 0
+    @State private var isShowingDetails = false
 
     var body: some View {
         GeometryReader { geo in
@@ -22,10 +23,22 @@ struct StoryViewer: View {
                 Color.black
                     .opacity(isPhone ? 1 - dragProgress * 0.7 : 0.94 - dragProgress * 0.6)
                     .ignoresSafeArea()
-                    .onTapGesture { if !isPhone { store.closeStory() } }
+                    .onTapGesture {
+                        if isShowingDetails {
+                            withAnimation(.spring(duration: 0.3, bounce: 0.1)) { isShowingDetails = false }
+                        } else if !isPhone {
+                            store.closeStory()
+                        }
+                    }
 
                 if let tray = store.storyViewer {
-                    StoryCanvas(tray: tray, store: store, isPhone: isPhone) { delta in
+                    StoryCanvas(
+                        tray: tray,
+                        store: store,
+                        isPhone: isPhone,
+                        isShowingViewers: $isShowingDetails
+                    ) { delta in
+                        isShowingDetails = false
                         move(delta)
                     }
                     .frame(width: canvas.width, height: canvas.height)
@@ -37,9 +50,15 @@ struct StoryViewer: View {
 
                 if !isPhone {
                     HStack(spacing: 0) {
-                        sideButton("chevron.left", enabled: store.adjacentStory(-1) != nil) { move(-1) }
+                        sideButton("chevron.left", enabled: store.adjacentStory(-1) != nil) {
+                            isShowingDetails = false
+                            move(-1)
+                        }
                         Spacer().frame(width: canvas.width + 36)
-                        sideButton("chevron.right", enabled: store.adjacentStory(1) != nil) { move(1) }
+                        sideButton("chevron.right", enabled: store.adjacentStory(1) != nil) {
+                            isShowingDetails = false
+                            move(1)
+                        }
                     }
                     .zIndex(2)
                 }
@@ -50,12 +69,21 @@ struct StoryViewer: View {
             .gesture(
                 DragGesture(minimumDistance: 24)
                     .onChanged { value in
-                        if abs(value.translation.height) > abs(value.translation.width) {
+                        guard !isShowingDetails else { return }
+                        if value.translation.height > 0 && abs(value.translation.height) > abs(value.translation.width) {
                             dragOffset = value.translation.height
                         }
                     }
                     .onEnded { value in
-                        if value.translation.height > 140 || value.predictedEndTranslation.height > 320 {
+                        if isShowingDetails {
+                            if value.translation.height > 70 || value.predictedEndTranslation.height > 160 {
+                                withAnimation(.spring(duration: 0.3, bounce: 0.1)) { isShowingDetails = false }
+                            }
+                            return
+                        }
+                        if value.translation.height < -45 && abs(value.translation.height) > abs(value.translation.width) {
+                            withAnimation(.spring(duration: 0.32, bounce: 0.12)) { isShowingDetails = true }
+                        } else if value.translation.height > 140 || value.predictedEndTranslation.height > 320 {
                             store.closeStory()
                         } else if abs(value.translation.width) > 90 && abs(value.translation.width) > abs(value.translation.height) {
                             move(value.translation.width < 0 ? 1 : -1)
@@ -79,15 +107,23 @@ struct StoryViewer: View {
         }
         // Arrow and space keys are handled by the focused canvas; these bubble up from it.
         .onKeyPress(.escape) {
-            store.closeStory()
+            if isShowingDetails {
+                withAnimation(.spring(duration: 0.28, bounce: 0.1)) { isShowingDetails = false }
+            } else {
+                store.closeStory()
+            }
             return .handled
         }
         .onKeyPress(.upArrow) {
-            move(-1)
+            withAnimation(.spring(duration: 0.32, bounce: 0.12)) { isShowingDetails = true }
             return .handled
         }
         .onKeyPress(.downArrow) {
-            move(1)
+            if isShowingDetails {
+                withAnimation(.spring(duration: 0.28, bounce: 0.1)) { isShowingDetails = false }
+            } else {
+                store.closeStory()
+            }
             return .handled
         }
     }
@@ -125,6 +161,7 @@ private struct StoryCanvas: View {
     let tray: IGStoryTray
     @Bindable var store: AppStore
     let isPhone: Bool
+    @Binding var isShowingViewers: Bool
     let onLeaveTray: (Int) -> Void
 
     @State private var index: Int
@@ -134,50 +171,100 @@ private struct StoryCanvas: View {
     @State private var isMediaReady = false
     @State private var isMuted = false
     @State private var pressStart: Date?
-    @State private var isShowingViewers = false
+    @State private var isLoadingViewers = false
+    @State private var viewerSearch = ""
+    @State private var replyDraft = ""
+    @State private var isSendingReply = false
+    @State private var sentReplyToast = false
+    @State private var likedSlides: Set<String> = []
     @FocusState private var isFocused: Bool
+    @FocusState private var isReplyFocused: Bool
 
-    init(tray: IGStoryTray, store: AppStore, isPhone: Bool, onLeaveTray: @escaping (Int) -> Void) {
+    init(
+        tray: IGStoryTray,
+        store: AppStore,
+        isPhone: Bool,
+        isShowingViewers: Binding<Bool>,
+        onLeaveTray: @escaping (Int) -> Void
+    ) {
         self.tray = tray
         self.store = store
         self.isPhone = isPhone
+        self._isShowingViewers = isShowingViewers
         self.onLeaveTray = onLeaveTray
         _index = State(initialValue: tray.resumeIndex)
     }
 
     private var slide: IGMediaItem? { tray.slides[safe: index] }
 
+    private var isOwnStory: Bool {
+        tray.user.id == store.viewerID
+            || (store.viewerUsername != nil && tray.user.username.lowercased() == store.viewerUsername?.lowercased())
+    }
+
     var body: some View {
-        ZStack {
-            Color(white: 0.08)
+        GeometryReader { geo in
+            ZStack(alignment: .bottom) {
+                Color(white: 0.08)
 
-            media
+                ZStack {
+                    media
 
-            if !isMediaReady || slide == nil {
-                if tray.slides.isEmpty && !store.isLoadingStory(tray.id) {
-                    VStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.circle")
-                            .font(.system(size: 28))
-                        Text("Hikaye yüklenemedi")
-                            .font(.system(size: 14, weight: .semibold))
-                        Button("Tekrar Dene") { Task { await store.loadStorySlides(for: tray) } }
-                            .buttonStyle(.glass)
+                    if !isMediaReady || slide == nil {
+                        if tray.slides.isEmpty && !store.isLoadingStory(tray.id) {
+                            VStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.circle")
+                                    .font(.system(size: 28))
+                                Text("Hikaye yüklenemedi")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Button("Tekrar Dene") { Task { await store.loadStorySlides(for: tray) } }
+                                    .buttonStyle(.glass)
+                            }
+                            .foregroundStyle(.white)
+                        } else {
+                            ProgressView().tint(.white).controlSize(.large)
+                        }
                     }
-                    .foregroundStyle(.white)
-                } else {
-                    ProgressView().tint(.white).controlSize(.large)
+
+                    touchLayer
+
+                    chrome
+                        .opacity(isHolding || isShowingViewers ? 0 : 1)
+                        .animation(.easeOut(duration: 0.2), value: isHolding || isShowingViewers)
+                }
+                .scaleEffect(isShowingViewers ? 0.34 : 1.0, anchor: .top)
+                .offset(y: isShowingViewers ? 14 : 0)
+                .allowsHitTesting(!isShowingViewers)
+                .animation(.spring(duration: 0.32, bounce: 0.1), value: isShowingViewers)
+
+                if isShowingViewers {
+                    Color.black.opacity(0.25)
+                        .contentShape(.rect)
+                        .onTapGesture {
+                            withAnimation(.spring(duration: 0.28, bounce: 0.1)) { isShowingViewers = false }
+                        }
+                        .transition(.opacity)
+
+                    if let slide {
+                        storyDetailsSheet(slide: slide, height: geo.size.height * 0.62)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .zIndex(3)
+                    }
                 }
             }
-
-            touchLayer
-
-            chrome
-                .opacity(isHolding ? 0 : 1)
-                .animation(.easeOut(duration: 0.2), value: isHolding)
         }
         .task(id: "\(tray.slides.count)-\(index)") { await play() }
         .onChange(of: clock.isPaused) { _, paused in
             if paused { player.pause() } else if slide?.videoURL != nil { player.play() }
+        }
+        .onChange(of: isShowingViewers) { _, showing in
+            clock.isPaused = showing || isReplyFocused
+            if showing, let slide {
+                Task { await refreshViewers(for: slide) }
+            }
+        }
+        .onChange(of: isReplyFocused) { _, focused in
+            clock.isPaused = focused || isShowingViewers
         }
         .onChange(of: isMuted) { _, muted in player.isMuted = muted }
         .onChange(of: tray.slides.count) { old, _ in
@@ -193,14 +280,19 @@ private struct StoryCanvas: View {
             player.replaceCurrentItem(with: nil)
         }
         .onKeyPress(.leftArrow) {
+            guard !isReplyFocused else { return .ignored }
+            isShowingViewers = false
             step(-1)
             return .handled
         }
         .onKeyPress(.rightArrow) {
+            guard !isReplyFocused else { return .ignored }
+            isShowingViewers = false
             step(1)
             return .handled
         }
         .onKeyPress(.space) {
+            guard !isReplyFocused else { return .ignored }
             clock.isPaused.toggle()
             return .handled
         }
@@ -228,6 +320,10 @@ private struct StoryCanvas: View {
         let next = tray.slides[safe: index + 1]
         ImagePipeline.shared.prefetch([next?.imageURL], maxPixelSize: 1440)
 
+        if isOwnStory || slide.viewerCount != nil || !slide.viewers.isEmpty {
+            Task { await refreshViewers(for: slide) }
+        }
+
         var duration: Double = 5
         if let videoURL = slide.videoURL {
             let asset = AVURLAsset(url: videoURL)
@@ -240,7 +336,9 @@ private struct StoryCanvas: View {
                 duration = slide.duration ?? 15
             }
             guard !Task.isCancelled else { return }
-            player.play()
+            if !isShowingViewers && !isReplyFocused {
+                player.play()
+            }
         } else {
             player.replaceCurrentItem(with: nil)
             if let url = slide.imageURL {
@@ -250,6 +348,16 @@ private struct StoryCanvas: View {
         }
         isMediaReady = true
         clock.start(duration: duration) { step(1) }
+        if isShowingViewers || isReplyFocused {
+            clock.isPaused = true
+        }
+    }
+
+    private func refreshViewers(for slide: IGMediaItem) async {
+        guard !isLoadingViewers else { return }
+        isLoadingViewers = true
+        defer { isLoadingViewers = false }
+        await store.loadStoryViewers(trayID: tray.id, slideID: slide.id)
     }
 
     private func step(_ delta: Int) {
@@ -270,14 +378,22 @@ private struct StoryCanvas: View {
 
     // MARK: Touch
 
-    /// Taps advance or go back; holding pauses. One gesture so a hold never also counts as a tap.
+    /// Taps advance or go back; holding pauses; dragging up opens the story insights & viewers drawer.
     private var touchLayer: some View {
         GeometryReader { geo in
             Color.clear
                 .contentShape(.rect)
                 .gesture(
                     DragGesture(minimumDistance: 0)
-                        .onChanged { _ in
+                        .onChanged { value in
+                            if abs(value.translation.height) > 16 || abs(value.translation.width) > 16 {
+                                pressStart = nil
+                                if isHolding {
+                                    isHolding = false
+                                    clock.isPaused = false
+                                }
+                                return
+                            }
                             guard pressStart == nil else { return }
                             pressStart = .now
                             Task {
@@ -292,9 +408,32 @@ private struct StoryCanvas: View {
                             let wasHolding = isHolding
                             pressStart = nil
                             isHolding = false
-                            clock.isPaused = false
+                            clock.isPaused = isShowingViewers || isReplyFocused
+
+                            // Swipe up -> open story details & viewers sheet
+                            if value.translation.height < -32 && abs(value.translation.height) > abs(value.translation.width) {
+                                withAnimation(.spring(duration: 0.32, bounce: 0.12)) {
+                                    isShowingViewers = true
+                                }
+                                return
+                            }
+                            // Swipe down -> close story viewer
+                            if value.translation.height > 110 && abs(value.translation.height) > abs(value.translation.width) {
+                                store.closeStory()
+                                return
+                            }
+                            // Horizontal swipe -> adjacent person's story
+                            if abs(value.translation.width) > 80 && abs(value.translation.width) > abs(value.translation.height) {
+                                onLeaveTray(value.translation.width < 0 ? 1 : -1)
+                                return
+                            }
+
                             let moved = abs(value.translation.width) > 10 || abs(value.translation.height) > 10
                             guard !wasHolding, !moved else { return }
+                            if isReplyFocused {
+                                isReplyFocused = false
+                                return
+                            }
                             step(value.location.x < geo.size.width * 0.3 ? -1 : 1)
                         }
                 )
@@ -314,7 +453,7 @@ private struct StoryCanvas: View {
                     } label: {
                         HStack(spacing: 8) {
                             AvatarView(url: tray.title == nil ? tray.user.avatarURL : (tray.coverURL ?? tray.user.avatarURL), size: 32)
-                            Text(tray.title ?? tray.user.username)
+                            Text(tray.title ?? (isOwnStory ? "Hikayen" : tray.user.username))
                                 .font(.system(size: 13.5, weight: .semibold))
                                 .lineLimit(1)
                             if tray.user.isVerified && tray.title == nil {
@@ -342,6 +481,13 @@ private struct StoryCanvas: View {
                     }
 
                     Menu {
+                        Button {
+                            withAnimation(.spring(duration: 0.32, bounce: 0.12)) {
+                                isShowingViewers = true
+                            }
+                        } label: {
+                            Label(isOwnStory ? "Hikaye Detayları ve İzleyenler" : "Hikaye Bilgileri", systemImage: "eye")
+                        }
                         Button {
                             NSWorkspace.shared.open(URL(string: "https://www.instagram.com/stories/\(tray.user.username)/")!)
                         } label: {
@@ -380,118 +526,339 @@ private struct StoryCanvas: View {
 
             Spacer()
 
-            if let slide, tray.user.id == store.viewerID || slide.viewerCount != nil || !slide.viewers.isEmpty {
-                let count = slide.viewerCount ?? slide.viewers.count
-                HStack {
-                    Button {
-                        clock.isPaused = true
+            if let slide {
+                bottomBar(for: slide)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bottomBar(for slide: IGMediaItem) -> some View {
+        let hasViewerInfo = isOwnStory || slide.viewerCount != nil || !slide.viewers.isEmpty
+        if hasViewerInfo {
+            let count = max(slide.viewerCount ?? 0, slide.viewers.count)
+            HStack {
+                Button {
+                    withAnimation(.spring(duration: 0.32, bounce: 0.12)) {
                         isShowingViewers = true
-                    } label: {
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("Detaylar için yukarı kaydır")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.white.opacity(0.78))
+
                         HStack(spacing: 8) {
                             if !slide.viewers.isEmpty {
                                 HStack(spacing: -8) {
                                     ForEach(slide.viewers.prefix(3)) { viewer in
-                                        AvatarView(url: viewer.avatarURL, size: 24)
+                                        AvatarView(url: viewer.avatarURL, size: 26)
                                             .overlay(Circle().strokeBorder(.black, lineWidth: 1.5))
                                     }
                                 }
                             } else {
                                 Image(systemName: "eye.fill")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.system(size: 13.5, weight: .semibold))
                             }
-                            Text("\(count) görüntüleme")
-                                .font(.system(size: 13, weight: .semibold))
-                            Image(systemName: "chevron.up")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white.opacity(0.75))
+                            Text(count > 0 ? "\(count) kişi gördü" : (isLoadingViewers ? "İzleyenler yükleniyor…" : "Henüz görüntüleyen yok"))
+                                .font(.system(size: 13.5, weight: .semibold))
+                            if isLoadingViewers {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(.white)
+                            }
                         }
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Capsule().fill(.black.opacity(0.45)))
+                        .background(Capsule().fill(.black.opacity(0.5)))
                     }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $isShowingViewers, arrowEdge: .bottom) {
-                        storyViewersPopover(slide: slide, count: count)
-                    }
-                    .onChange(of: isShowingViewers) { _, showing in
-                        clock.isPaused = showing
-                    }
+                }
+                .buttonStyle(.plain)
 
-                    Spacer()
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, isPhone ? 18 : 14)
+            .padding(.top, 16)
+            .background(
+                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+            )
+        } else {
+            // Native Instagram bottom bar on other people's stories: reply field + heart + share
+            let isLiked = likedSlides.contains(slide.id)
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    TextField(
+                        "\(tray.user.username) adlı kişiye mesaj gönder…",
+                        text: $replyDraft
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(.white)
+                    .focused($isReplyFocused)
+                    .onSubmit { sendReply(for: slide) }
+
+                    if sentReplyToast {
+                        Text("Gönderildi ✓")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.green)
+                            .transition(.opacity)
+                    } else if !replyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button("Gönder") { sendReply(for: slide) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .disabled(isSendingReply)
+                    }
                 }
                 .padding(.horizontal, 14)
-                .padding(.bottom, isPhone ? 18 : 14)
+                .padding(.vertical, 9)
                 .background(
-                    LinearGradient(colors: [.clear, .black.opacity(0.45)], startPoint: .top, endPoint: .bottom)
-                        .allowsHitTesting(false)
+                    Capsule()
+                        .fill(.black.opacity(0.35))
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.5), lineWidth: 1))
                 )
+
+                Button {
+                    withAnimation(.spring(duration: 0.3, bounce: 0.5)) {
+                        if isLiked {
+                            likedSlides.remove(slide.id)
+                        } else {
+                            likedSlides.insert(slide.id)
+                            Task { _ = await store.replyToStory(tray, slide: slide, text: "❤️") }
+                        }
+                    }
+                } label: {
+                    Image(systemName: isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: 22))
+                        .foregroundStyle(isLiked ? Color.igLike : .white)
+                        .symbolEffect(.bounce, value: isLiked)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    store.closeStory()
+                    store.openDirect(with: tray.user)
+                } label: {
+                    Image(systemName: "paperplane")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, isPhone ? 18 : 14)
+            .padding(.top, 16)
+            .background(
+                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+                    .allowsHitTesting(false)
+            )
+        }
+    }
+
+    private func sendReply(for slide: IGMediaItem) {
+        let text = replyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isSendingReply else { return }
+        isSendingReply = true
+        replyDraft = ""
+        isReplyFocused = false
+        Task {
+            let ok = await store.replyToStory(tray, slide: slide, text: text)
+            isSendingReply = false
+            if ok {
+                withAnimation { sentReplyToast = true }
+                try? await Task.sleep(for: .seconds(1.8))
+                withAnimation { sentReplyToast = false }
             }
         }
     }
 
-    private func storyViewersPopover(slide: IGMediaItem, count: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    // MARK: Slide-up Story Insights & Viewers Sheet
+
+    private func storyDetailsSheet(slide: IGMediaItem, height: CGFloat) -> some View {
+        let count = max(slide.viewerCount ?? 0, slide.viewers.count)
+        let query = viewerSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filteredViewers = query.isEmpty ? slide.viewers : slide.viewers.filter {
+            $0.username.lowercased().contains(query) || $0.fullName.lowercased().contains(query)
+        }
+
+        return VStack(alignment: .leading, spacing: 0) {
+            // Drag indicator
             HStack {
-                Label("\(count) görüntüleme", systemImage: "eye.fill")
-                    .font(.system(size: 13.5, weight: .semibold))
                 Spacer()
+                Capsule()
+                    .fill(.secondary.opacity(0.45))
+                    .frame(width: 36, height: 4.5)
+                Spacer()
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            // Header: viewer count + timestamp + actions
+            HStack(spacing: 12) {
+                HStack(spacing: 7) {
+                    Image(systemName: "eye.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text("\(count) görüntüleme")
+                        .font(.system(size: 15, weight: .bold))
+                        .contentTransition(.numericText(value: Double(count)))
+                    if isLoadingViewers {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+
+                Spacer()
+
                 if let date = slide.takenAt {
-                    Text(date.formatted(date: .abbreviated, time: .shortened))
-                        .font(.system(size: 11.5))
+                    Text("\(date.igAge) · \(date.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
+
+                Button {
+                    Task { await refreshViewers(for: slide) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("İzleyenleri yenile")
+
+                Button {
+                    withAnimation(.spring(duration: 0.28, bounce: 0.1)) { isShowingViewers = false }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+
+            if slide.viewers.count > 5 {
+                TextField("İzleyenlerde ara…", text: $viewerSearch)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
 
             Divider()
 
-            if slide.viewers.isEmpty {
-                Text(count > 0 ? "İzleyen listesi bu hikaye için kullanılamıyor." : "Henüz kimse görüntülemedi.")
-                    .font(.system(size: 12.5))
+            if isLoadingViewers && slide.viewers.isEmpty {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("İzleyenler yükleniyor…")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredViewers.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "eye.slash")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.secondary)
+                    Text(
+                        !query.isEmpty
+                            ? "Sonuç bulunamadı"
+                            : (count > 0
+                                ? "\(count) kişi bu hikayeyi gördü.\nDetaylı izleyen listesi yalnızca kendi aktif hikayelerinde görünür."
+                                : "Bu hikayeyi henüz kimse görüntülemedi.")
+                    )
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(slide.viewers) { viewer in
-                            Button {
-                                isShowingViewers = false
-                                store.openProfile(of: viewer)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    AvatarView(url: viewer.avatarURL, size: 34)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        HStack(spacing: 4) {
-                                            Text(viewer.username)
-                                                .font(.system(size: 13, weight: .semibold))
-                                            if viewer.isVerified {
-                                                VerifiedBadge(size: 11)
+                        ForEach(filteredViewers) { viewer in
+                            let hasLiked = slide.likedViewerIDs.contains(viewer.id)
+                            HStack(spacing: 12) {
+                                Button {
+                                    isShowingViewers = false
+                                    store.openProfile(of: viewer)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        AvatarView(url: viewer.avatarURL, size: 40)
+                                            .overlay(alignment: .bottomTrailing) {
+                                                if hasLiked {
+                                                    Image(systemName: "heart.fill")
+                                                        .font(.system(size: 9, weight: .bold))
+                                                        .foregroundStyle(.white)
+                                                        .padding(3.5)
+                                                        .background(Circle().fill(Color.igLike))
+                                                        .offset(x: 2, y: 2)
+                                                }
+                                            }
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack(spacing: 4) {
+                                                Text(viewer.username)
+                                                    .font(.system(size: 13.5, weight: .semibold))
+                                                if viewer.isVerified {
+                                                    VerifiedBadge(size: 11)
+                                                }
+                                            }
+                                            if !viewer.fullName.isEmpty {
+                                                Text(viewer.fullName)
+                                                    .font(.system(size: 12.5))
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(1)
                                             }
                                         }
-                                        if !viewer.fullName.isEmpty {
-                                            Text(viewer.fullName)
-                                                .font(.system(size: 12))
-                                                .foregroundStyle(.secondary)
-                                        }
+                                        Spacer()
                                     }
-                                    Spacer()
+                                    .contentShape(.rect)
                                 }
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .contentShape(.rect)
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    isShowingViewers = false
+                                    store.closeStory()
+                                    store.openDirect(with: viewer)
+                                } label: {
+                                    Image(systemName: "paperplane")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 32, height: 32)
+                                        .contentShape(.rect)
+                                }
+                                .buttonStyle(.plain)
+                                .help("@\(viewer.username) kişisine mesaj gönder")
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
                         }
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
                 }
-                .frame(maxHeight: 280)
             }
         }
-        .frame(width: 280)
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(.regularMaterial, in: .rect(topLeadingRadius: 18, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 18, style: .continuous))
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .onEnded { value in
+                    if value.translation.height > 45 || value.predictedEndTranslation.height > 120 {
+                        withAnimation(.spring(duration: 0.28, bounce: 0.1)) {
+                            isShowingViewers = false
+                        }
+                    }
+                }
+        )
     }
 
     private func chromeButton(_ symbol: String, action: @escaping () -> Void) -> some View {

@@ -35,6 +35,42 @@ struct InstagramAPI {
         return decoded.slides(for: reelID)
     }
 
+    func storyViewers(mediaID: String) async throws -> (users: [IGUser], likedIDs: Set<String>, count: Int?) {
+        let pk = mediaID.split(separator: "_").first.map(String.init) ?? mediaID
+        let decoded = try await fetchDecoded(
+            APIStoryViewersResponse.self,
+            "/api/v1/media/\(Self.encode(pk))/list_reel_media_viewer/?include_blacklist_sample=true"
+        )
+        return decoded.parsedViewers
+    }
+
+    func mediaInfo(mediaID: String) async throws -> IGPost? {
+        let pk = mediaID.split(separator: "_").first.map(String.init) ?? mediaID
+        let decoded = try await fetchDecoded(
+            APIMediaInfoResponse.self,
+            "/api/v1/media/\(Self.encode(pk))/info/"
+        )
+        return decoded.firstPost
+    }
+
+    func mediaInfo(shortcode: String) async throws -> IGPost? {
+        guard let pk = Self.mediaPK(fromShortcode: shortcode) else { return nil }
+        return try await mediaInfo(mediaID: pk)
+    }
+
+    /// Converts an Instagram shortcode (`/p/<code>/` or `/reel/<code>/`) to its numeric media PK.
+    static func mediaPK(fromShortcode shortcode: String) -> String? {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        let clean = String(shortcode.prefix(11))
+        guard !clean.isEmpty else { return nil }
+        var id: UInt64 = 0
+        for ch in clean {
+            guard let idx = alphabet.firstIndex(of: ch) else { return nil }
+            id = (id &* 64) &+ UInt64(idx)
+        }
+        return id > 0 ? String(id) : nil
+    }
+
     // MARK: Explore, Reels, Search & Activity
 
     func exploreGrid() async throws -> [IGPost] {

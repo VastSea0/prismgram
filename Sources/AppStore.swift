@@ -442,7 +442,26 @@ final class AppStore {
         feedPhase = .loading
         do {
             if let loadedTray = try? await run({ try await $0.reelsTray() }) {
-                stories = loadedTray
+                var mergedTray = loadedTray
+                if let vid = viewerID, !mergedTray.contains(where: { $0.user.id == vid }) {
+                    if let ownSlides = try? await run({ try await $0.reelsMedia(reelID: vid) }), !ownSlides.isEmpty {
+                        let ownUser = viewer ?? IGUser(
+                            id: vid,
+                            username: viewerUsername ?? "Hikayen",
+                            fullName: "",
+                            avatarURL: nil,
+                            isVerified: false
+                        )
+                        let own = IGStoryTray(
+                            id: vid,
+                            user: ownUser,
+                            hasUnseen: false,
+                            slides: ownSlides
+                        )
+                        mergedTray.insert(own, at: 0)
+                    }
+                }
+                stories = mergedTray
                 if let ownTray = stories.first(where: { $0.user.id == viewerID }) {
                     viewerUsername = ownTray.user.username
                 }
@@ -516,7 +535,9 @@ final class AppStore {
     }
 
     private func prepareStory(_ tray: IGStoryTray) {
-        if latest(tray).slides.isEmpty {
+        let current = latest(tray)
+        let isOwn = tray.user.id == viewerID || (viewerUsername != nil && tray.user.username == viewerUsername)
+        if current.slides.isEmpty || (isOwn && current.slides.contains(where: { $0.viewerCount == nil || $0.viewers.isEmpty })) {
             Task { await loadStorySlides(for: tray) }
         }
         // Load the next person's story while this one plays, so moving on does not show a spinner.
@@ -563,19 +584,108 @@ final class AppStore {
     }
 
     private func applyStorySlides(_ slides: [IGMediaItem], for trayID: String) {
+        func mergeSlides(_ existing: [IGMediaItem], with incoming: [IGMediaItem]) -> [IGMediaItem] {
+            let byID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+            return incoming.map { slide in
+                guard let prev = byID[slide.id] else { return slide }
+                var merged = slide
+                if merged.viewerCount == nil { merged.viewerCount = prev.viewerCount }
+                if merged.viewers.isEmpty { merged.viewers = prev.viewers }
+                if merged.likedViewerIDs.isEmpty { merged.likedViewerIDs = prev.likedViewerIDs }
+                return merged
+            }
+        }
         if let index = stories.firstIndex(where: { $0.id == trayID }) {
-            stories[index].slides = slides
+            stories[index].slides = mergeSlides(stories[index].slides, with: slides)
         }
         if let index = profileHighlights.firstIndex(where: { $0.id == trayID }) {
-            profileHighlights[index].slides = slides
+            profileHighlights[index].slides = mergeSlides(profileHighlights[index].slides, with: slides)
         }
         if let index = storyQueue.firstIndex(where: { $0.id == trayID }) {
-            storyQueue[index].slides = slides
+            storyQueue[index].slides = mergeSlides(storyQueue[index].slides, with: slides)
         }
         if var current = storyViewer, current.id == trayID {
-            current.slides = slides
+            current.slides = mergeSlides(current.slides, with: slides)
             storyViewer = current
         }
+    }
+
+    /// Loads the full viewer list and viewer count for a story slide (`list_reel_media_viewer`).
+    func loadStoryViewers(trayID: String, slideID: String) async {
+        do {
+            let result = try await run { try await $0.storyViewers(mediaID: slideID) }
+            updateStorySlide(trayID: trayID, slideID: slideID) { slide in
+                if !result.users.isEmpty {
+                    var seen = Set(result.users.map(\.id))
+                    var combined = result.users
+                    for existing in slide.viewers where seen.insert(existing.id).inserted {
+                        combined.append(existing)
+                    }
+                    slide.viewers = combined
+                }
+                slide.likedViewerIDs.formUnion(result.likedIDs)
+                if let count = result.count {
+                    slide.viewerCount = max(count, slide.viewers.count)
+                } else if slide.viewerCount == nil {
+                    slide.viewerCount = slide.viewers.count
+                }
+            }
+        } catch {
+            // Fallback: refresh the reel via `reels_media` if `list_reel_media_viewer` was unavailable.
+            if let slides = try? await run({ try await $0.reelsMedia(reelID: trayID) }), !slides.isEmpty {
+                applyStorySlides(slides, for: trayID)
+            }
+        }
+    }
+
+    private func updateStorySlide(trayID: String, slideID: String, _ change: (inout IGMediaItem) -> Void) {
+        func apply(to tray: inout IGStoryTray) {
+            guard tray.id == trayID else { return }
+            let pk = slideID.split(separator: "_").first.map(String.init) ?? slideID
+            if let idx = tray.slides.firstIndex(where: { $0.id == slideID || $0.id.hasPrefix(pk) }) {
+                change(&tray.slides[idx])
+            }
+        }
+        for i in stories.indices { apply(to: &stories[i]) }
+        for i in profileHighlights.indices { apply(to: &profileHighlights[i]) }
+        for i in storyQueue.indices { apply(to: &storyQueue[i]) }
+        if var current = storyViewer, current.id == trayID {
+            apply(to: &current)
+            storyViewer = current
+        }
+    }
+
+    /// Sends a story reply (or direct message) to the story's author.
+    func replyToStory(_ tray: IGStoryTray, slide: IGMediaItem, text: String) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        haptic(.levelChange)
+        let pk = slide.id.split(separator: "_").first.map(String.init) ?? slide.id
+        if let thread = directThreads.first(where: { !$0.isGroup && $0.users.first?.id == tray.user.id }) {
+            for id in Set([thread.id, thread.threadFBID]) where !id.isEmpty {
+                if await broadcast(kind: "reel_share", fields: [
+                    "thread_ids": "[\"\(id)\"]",
+                    "media_id": pk,
+                    "text": trimmed,
+                    "entry": "reel"
+                ]) != nil {
+                    return true
+                }
+            }
+            return await deliver(text: trimmed, to: thread)
+        }
+        if await broadcast(kind: "reel_share", fields: [
+            "recipient_users": "[[\(tray.user.id)]]",
+            "media_id": pk,
+            "text": trimmed,
+            "entry": "reel"
+        ]) != nil {
+            return true
+        }
+        return await broadcast(kind: "text", fields: [
+            "recipient_users": "[[\(tray.user.id)]]",
+            "text": trimmed
+        ]) != nil
     }
 
     func loadExplore() async {
