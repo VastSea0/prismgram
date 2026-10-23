@@ -32,6 +32,27 @@ kept in the app's persistent website data store.
 - **Hybrid (`⌃2`)** — Two-column macOS split view (`1000×860`)
 - **Desktop (`⌃3`)** — Full three-column workspace (`1400×920`) with the live Notifications inspector (`⌥⌘I`)
 
+## Architecture
+
+Prismgram renders its entire UI in SwiftUI (`AppStore` + view files) while keeping an offscreen
+`WKWebView` running `instagram.com` so every request is issued by the genuine web client with
+your signed-in session:
+
+- **`BridgeScripts`** (`Sources/BridgeScripts.swift`) — Installs a versioned `window.__prismgram`
+  object at document start (`request`, `navigate`, `scrollToBottom`, `threadState`,
+  `sendDirectMessage`, `messageAction`, `detectViewerUsername`, `config`), plus the `igReady`
+  SPA boot signal and the `igTap` `fetch`/XHR network tap. Header constants (`X-IG-App-ID`,
+  `X-ASBD-ID`) are read from the page's own inline scripts with safe fallbacks, and DOM actions
+  use ordered structural/multi-language strategies that return `{ok, step, strategy}` diagnostics.
+- **`InstagramClient` & `InstagramTransport`** (`Sources/InstagramClient.swift`) — Owns the
+  hidden `WKWebView`, waits for both `didFinish` and `igReady` (with a 3 s grace fallback), and
+  serializes any flow that navigates, scrolls or types in the page through `withPage(_:_:)` so
+  concurrent profile and DM flows cannot steal the page from one another.
+- **`InstagramAPI` & `APIModels`** (`Sources/InstagramAPI.swift`, `Sources/APIModels.swift`) —
+  Typed wrappers and `Decodable` response models for every `/api/v1/` endpoint, converting wire
+  payloads into the domain models in `Sources/Models.swift` and logging exact `codingPath`s when
+  `PRISMGRAM_DEBUG=1` is set.
+
 ## Status
 
 See [docs/FEATURES.md](docs/FEATURES.md) for what works and what is still missing.

@@ -55,12 +55,12 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Inbox | ✅ | Driven by hidden WebView `/direct/inbox/` (`PolarisDirectInboxQuery`) |
-| Read and send messages | ✅ | Apple Messages layout; optimistic sending with retry, sent through the hidden WebView composer |
-| Notes | ✅ | Native Notes bar (`IGDInboxTrayQuery`, text + music metadata) |
+| Inbox | ✅ | Driven by hidden WebView `/direct/inbox/` (`PolarisDirectInboxQuery`) under a serialized page lease |
+| Read and send messages | ✅ | Apple Messages layout; optimistic sending (`direct_v2/threads/broadcast/text/` with hidden WebView composer fallback) |
+| Notes | ✅ | Native Notes bar (`IGDInboxTrayQuery`, text + music playback, replies and own notes) |
 | Message requests | ❌ | |
 | Start a new chat, group chats | 🟡 | Existing group chats work; starting a new chat not yet covered |
-| Photos, reactions, replies, unsend | 🟡 | Attached photos/shares and reactions are shown; sending them, replies and unsend are missing |
+| Photos, reactions, replies, unsend | 🟡 | Attached photos/shares, emoji reactions and message replies work; sending photos and unsend are missing |
 
 ## Notifications
 
@@ -73,13 +73,13 @@ Legend: ✅ native · 🟡 partial · ❌ missing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Own profile header and grid | ✅ | `web_profile_info` + paginated `/api/v1/feed/user/`, Instagram iOS layout |
+| Own profile header and grid | ✅ | Driven by hidden WebView `/<username>/` (`PolarisProfilePageContentQuery` + `PolarisProfilePostsQuery`), Instagram iOS layout |
 | Other people's profiles | ✅ | Click any author in feed, stories, reels, notes, or messages |
 | Follow / unfollow | ✅ | Native button on other users' profiles |
-| Reels, tagged and saved tabs | ✅ | `clips/user`, `usertags`, `feed/saved` |
+| Reels, tagged and saved tabs | ✅ | Driven by hidden WebView `/<username>/reels/`, `/tagged/`, `/saved/all-posts/` with scroll pagination |
 | Followers / following lists | ✅ | Searchable, paginated sheet |
-| Highlights | ✅ | `/api/v1/highlights/<id>/highlights_tray/`, played in sequence in the story viewer |
-| Edit profile, settings, log out | 🟡 | Edit profile opens instagram.com |
+| Highlights | ✅ | `PolarisProfileStoryHighlightsTrayContentQuery` + `reels_media`, played in sequence in the story viewer |
+| Edit profile, settings, log out | ✅ | Native Prismgram preferences (`⌘,`), Instagram settings (`⇧⌘,`), account privacy toggle, in-app edit profile and sign out |
 
 ## Creating
 
