@@ -10,8 +10,9 @@ struct InstagramAPI {
 
     // MARK: Feed & Stories
 
-    func reelsTray() async throws -> [String: Any] {
-        try await fetch("/api/v1/feed/reels_tray/")
+    func reelsTray() async throws -> [IGStoryTray] {
+        let decoded = try await fetchDecoded(APIReelsTrayResponse.self, "/api/v1/feed/reels_tray/")
+        return decoded.stories
     }
 
     func timeline(cursor: String? = nil) async throws -> APITimelineResponse {
@@ -24,12 +25,14 @@ struct InstagramAPI {
         return try await fetchDecoded(APITimelineResponse.self, "/api/v1/feed/timeline/", method: "POST", body: body)
     }
 
-    func reelsMedia(reelID: String) async throws -> [String: Any] {
-        try await fetch(
+    func reelsMedia(reelID: String) async throws -> [IGMediaItem] {
+        let decoded = try await fetchDecoded(
+            APIReelsMediaResponse.self,
             "/api/v1/feed/reels_media/",
             method: "POST",
             body: "reel_ids=\(Self.encode(reelID))"
         )
+        return decoded.slides(for: reelID)
     }
 
     // MARK: Explore, Reels, Search & Activity
@@ -82,15 +85,18 @@ struct InstagramAPI {
         return json
     }
 
-    func createNote(text: String, closeFriends: Bool) async -> [String: Any]? {
+    func createNote(text: String, closeFriends: Bool) async -> APICreateNoteResponse? {
+        let path = "/api/v1/notes/create_note/"
         guard let response = try? await transport.request(
-            "/api/v1/notes/create_note/",
+            path,
             method: "POST",
             body: "note_style=0&text=\(Self.encode(text))&audience=\(closeFriends ? 1 : 0)"
         ),
         (200..<300).contains(response.status),
-        (response.json?["status"] as? String) == "ok" else { return nil }
-        return response.json
+        let data = response.data,
+        let decoded = try? APIDecoding.decode(APICreateNoteResponse.self, from: data, endpoint: path),
+        decoded.status == "ok" else { return nil }
+        return decoded
     }
 
     func deleteNote(id: String) async -> Bool {
@@ -123,25 +129,32 @@ struct InstagramAPI {
         return true
     }
 
-    func currentUser() async -> [String: Any]? {
-        guard let response = try? await transport.request("/api/v1/accounts/current_user/?edit=true"),
-              (200..<300).contains(response.status) else { return nil }
-        return response.json
+    func currentUser() async -> String? {
+        let path = "/api/v1/accounts/current_user/?edit=true"
+        guard let response = try? await transport.request(path),
+              (200..<300).contains(response.status),
+              let data = response.data,
+              let decoded = try? APIDecoding.decode(APICurrentUserResponse.self, from: data, endpoint: path),
+              let name = decoded.user?.username, !name.isEmpty else { return nil }
+        return name
     }
 
-    func setFollowing(userID: String, follow: Bool) async throws -> [String: Any] {
-        try await fetch(
+    func setFollowing(userID: String, follow: Bool) async throws -> APIFriendshipStatus? {
+        let decoded = try await fetchDecoded(
+            APIFriendshipMutationResponse.self,
             "/api/v1/friendships/\(follow ? "create" : "destroy")/\(userID)/",
             method: "POST",
             body: "container_module=profile&user_id=\(Self.encode(userID))"
         )
+        return decoded.friendship_status
     }
 
-    func friendshipList(userID: String, kind: FollowListKind, cursor: String?) async throws -> [String: Any] {
+    func friendshipList(userID: String, kind: FollowListKind, cursor: String?) async throws -> ([IGUser], String?) {
         var path = "/api/v1/friendships/\(userID)/\(kind.rawValue)/?count=24"
         if kind == .followers { path += "&search_surface=follow_list_page" }
         if let cursor { path += "&max_id=\(Self.encode(cursor))" }
-        return try await fetch(path)
+        let decoded = try await fetchDecoded(APIFriendshipListResponse.self, path)
+        return (decoded.parsedUsers, decoded.nextCursor)
     }
 
     // MARK: Media interactions

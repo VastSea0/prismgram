@@ -407,9 +407,8 @@ final class AppStore {
         guard feedPhase != .loading else { return }
         feedPhase = .loading
         do {
-            if let trayJSON = try? await run({ try await $0.reelsTray() }) {
-                let tray = (trayJSON["tray"] as? [[String: Any]]) ?? []
-                stories = tray.compactMap(IGJSON.storyTray)
+            if let loadedTray = try? await run({ try await $0.reelsTray() }) {
+                stories = loadedTray
                 if let ownTray = stories.first(where: { $0.user.id == viewerID }) {
                     viewerUsername = ownTray.user.username
                 }
@@ -503,8 +502,7 @@ final class AppStore {
         defer { loadingStoryIDs.remove(tray.id) }
 
         do {
-            let json = try await run { try await $0.reelsMedia(reelID: tray.id) }
-            let slides = IGJSON.storySlides(from: json, reelID: tray.id)
+            let slides = try await run { try await $0.reelsMedia(reelID: tray.id) }
             if !slides.isEmpty {
                 applyStorySlides(slides, for: tray.id)
                 return
@@ -866,8 +864,7 @@ final class AppStore {
     func createNote(text: String, closeFriends: Bool) async -> Bool {
         let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
         guard !trimmed.isEmpty,
-              let json = await api.createNote(text: trimmed, closeFriends: closeFriends) else { return false }
-        let noteDict = json["note"] as? [String: Any]
+              let created = await api.createNote(text: trimmed, closeFriends: closeFriends) else { return false }
         if let me = viewer {
             let note = IGNote(
                 id: "own-\(UUID().uuidString)",
@@ -876,7 +873,7 @@ final class AppStore {
                 musicTitle: nil,
                 musicArtist: nil,
                 createdAt: .now,
-                noteID: IGJSON.string(noteDict?["id"])
+                noteID: created.note?.id?.value
             )
             withAnimation(.snappy) { notes = [note] + notes.filter { $0.user.id != viewerID } }
         }
@@ -943,8 +940,7 @@ final class AppStore {
     /// from the page, or from any loaded tray, note or post of the viewer's.
     private func resolveViewerUsername() async -> String? {
         if let viewerUsername { return viewerUsername }
-        if let json = await api.currentUser(),
-           let name = (json["user"] as? [String: Any])?["username"] as? String, !name.isEmpty {
+        if let name = await api.currentUser() {
             viewerUsername = name
             return name
         }
@@ -1068,11 +1064,10 @@ final class AppStore {
         }
         Task {
             do {
-                let json = try await run { try await $0.setFollowing(userID: user.id, follow: target) }
-                if let status = json["friendship_status"] as? [String: Any] {
+                if let status = try await run({ try await $0.setFollowing(userID: user.id, follow: target) }) {
                     updateProfile(user.id) {
-                        $0.isFollowing = IGJSON.bool(status["following"]) ?? $0.isFollowing
-                        $0.isRequested = IGJSON.bool(status["outgoing_request"]) ?? $0.isRequested
+                        $0.isFollowing = status.following?.value ?? $0.isFollowing
+                        $0.isRequested = status.outgoing_request?.value ?? $0.isRequested
                     }
                 }
             } catch {
@@ -1094,9 +1089,7 @@ final class AppStore {
 
     /// Followers or following of a user, one page at a time.
     func loadFollowList(userID: String, kind: FollowListKind, cursor: String?) async throws -> ([IGUser], String?) {
-        let json = try await run { try await $0.friendshipList(userID: userID, kind: kind, cursor: cursor) }
-        let users = ((json["users"] as? [[String: Any]]) ?? []).compactMap(IGJSON.user)
-        return (users, IGJSON.string(json["next_max_id"]))
+        try await run { try await $0.friendshipList(userID: userID, kind: kind, cursor: cursor) }
     }
 
     /// Opens the chat with a user from their profile, or the inbox filtered to them when there is none yet.

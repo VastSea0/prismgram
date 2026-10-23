@@ -550,3 +550,98 @@ struct APINewsInboxResponse: Decodable {
         }
     }
 }
+
+// MARK: - Stories (`reels_tray` & `reels_media`)
+
+struct APIStoryReel: Decodable {
+    let id: FlexString?
+    let user: APIUser?
+    let items: LossyArray<APIMedia>?
+    let latest_reel_media: FlexDouble?
+    let seen: FlexDouble?
+    let title: String?
+    let cover_media: CoverMedia?
+
+    struct CoverMedia: Decodable {
+        let cropped_image_version: APIUser.URLHolder?
+    }
+
+    var storyTray: IGStoryTray? {
+        guard let owner = user?.domainModel else { return nil }
+        let slides = (items?.elements ?? []).compactMap(\.mediaItem)
+        let latest = latest_reel_media?.value ?? 0
+        let seenTime = seen?.value ?? 0
+        let trayID = id?.value ?? owner.id
+        return IGStoryTray(
+            id: trayID,
+            user: owner,
+            hasUnseen: seenTime < latest,
+            slides: slides,
+            title: title,
+            coverURL: IGJSON.url(cover_media?.cropped_image_version?.url),
+            seenAt: seenTime
+        )
+    }
+
+    var slides: [IGMediaItem] {
+        (items?.elements ?? []).compactMap(\.mediaItem)
+    }
+}
+
+struct APIReelsTrayResponse: Decodable {
+    let tray: LossyArray<APIStoryReel>?
+
+    var stories: [IGStoryTray] {
+        (tray?.elements ?? []).compactMap(\.storyTray)
+    }
+}
+
+struct APIReelsMediaResponse: Decodable {
+    let reels: [String: APIStoryReel]?
+    let reels_media: LossyArray<APIStoryReel>?
+
+    func slides(for reelID: String) -> [IGMediaItem] {
+        if let reel = reels?[reelID] ?? reels?.values.first {
+            let parsed = reel.slides
+            if !parsed.isEmpty { return parsed }
+        }
+        if let first = reels_media?.elements.first {
+            return first.slides
+        }
+        return []
+    }
+}
+
+// MARK: - Friendships, Account & Notes
+
+struct APIFriendshipMutationResponse: Decodable {
+    let friendship_status: APIFriendshipStatus?
+}
+
+struct APIFriendshipListResponse: Decodable {
+    let users: LossyArray<APIUser>?
+    let next_max_id: FlexString?
+
+    var parsedUsers: [IGUser] {
+        (users?.elements ?? []).compactMap(\.domainModel)
+    }
+
+    var nextCursor: String? { next_max_id?.value }
+}
+
+struct APICurrentUserResponse: Decodable {
+    let user: UserInfo?
+
+    struct UserInfo: Decodable {
+        let username: String?
+    }
+}
+
+struct APICreateNoteResponse: Decodable {
+    let status: String?
+    let note: NotePayload?
+
+    struct NotePayload: Decodable {
+        let id: FlexString?
+    }
+}

@@ -105,7 +105,7 @@ Do them in order; each depends on the previous ones.
       `/api/v1` strings left in `AppStore`. One commit per group is fine.
 
 ### T7 — Codable models, endpoint by endpoint
-- [ ] Introduce `Decodable` response types for the REST endpoints, one endpoint per commit,
+- [x] Introduce `Decodable` response types for the REST endpoints, one endpoint per commit,
       keeping the domain models in `Models.swift`. On decode failure, debug-log the endpoint
       and the coding path (not the payload). Start with timeline, then comments, explore,
       reels, search, activity.
@@ -125,3 +125,4 @@ Append newest at the bottom: `YYYY-MM-DD HH:MM — <agent> — <task> — <what 
 - 2026-10-23 11:10 — Antigravity — T4 — `__prismgram.config()` reads `"X-IG-App-ID"` / `"X-ASBD-ID"|"ASBD_ID"` from inline scripts (explicit keys only), caches per document, re-reads fallbacks after 30 s; Swift passes `appID`/`asbdID` as fallbacks and debug-logs the source after boot. Bridge v2. Manual check: `PRISMGRAM_DEBUG=1` prints `header constants ... from: page/...`; if it says fallback, nothing changes vs. before. NEXT: T5.
 - 2026-10-23 11:13 — Antigravity — T5 — Ordered DOM strategies (`findComposer`, `findSendControl`, `findActionControl`) try structural selectors first, multi-language labels second, and icon/button structure third; `sendDirectMessage` and `messageAction` return `{ok, step, strategy}` JSON and `InstagramClient.parseActionResult` debug-logs step/strategy (never message text). Bridge v3. Manual check: send/react/reply in DM with `PRISMGRAM_DEBUG=1` logs strategy used. NEXT: T6.
 - 2026-10-23 11:27 — Antigravity — T6 — Added `InstagramTransport` protocol and `Sources/InstagramAPI.swift` covering all 19 REST endpoints; `AppStore` talks through `InstagramTransport` and `InstagramAPI` with zero raw `/api/v1` strings left in `AppStore.swift`. NEXT: T7.
+- 2026-10-23 11:37 — Antigravity — T7 — Added `Sources/APIModels.swift` with `APIDecoding` (logs endpoint + `codingPath` on decode failure, never payload) and `Decodable` response models across separate commits for timeline, comments/addComment, explore, reels, search, activity, plus story tray/media, friendships, currentUser and notes. NEXT: T8.
