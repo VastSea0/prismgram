@@ -15,3 +15,4 @@ progress log in the same commit).
 - Build: `swift build` (fast check) · App bundle: `scripts/build-app.sh` then `open Prismgram.app`
 - Debug logging: `PRISMGRAM_DEBUG=1`
 - User-facing strings are Turkish; code, comments and commit messages are English.
+- JS syntax check for the page bridge: `scripts/check-bridge-js.sh` (all page JS lives in `Sources/BridgeScripts.swift`)

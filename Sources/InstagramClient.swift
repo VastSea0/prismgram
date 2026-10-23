@@ -53,10 +53,13 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     override init() {
         let controller = WKUserContentController()
         controller.addUserScript(
-            WKUserScript(source: Self.networkTapScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            WKUserScript(source: BridgeScripts.networkTap, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         controller.addUserScript(
-            WKUserScript(source: Self.bootSignalScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            WKUserScript(source: BridgeScripts.bootSignal, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
+        controller.addUserScript(
+            WKUserScript(source: BridgeScripts.bridge, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
 
         let configuration = WKWebViewConfiguration()
@@ -144,10 +147,10 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     }
 
     /// Called by the document-start script once the web app has mounted and its csrftoken cookie exists.
-    fileprivate func appDidBoot(path: String) {
+    fileprivate func appDidBoot(path: String, bridgeVersion: Int) {
         guard !isAppBooted else { return }
         isAppBooted = true
-        Self.debugLog("page booted at \(path)")
+        Self.debugLog("page booted at \(path) (page bridge v\(bridgeVersion), app bridge v\(BridgeScripts.version))")
         resumeWaitersIfReady()
     }
 
@@ -206,23 +209,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
     /// Attempts to read the signed-in viewer's username from the page's navigation bar or embedded scripts.
     func detectViewerUsername() async -> String? {
-        let script = """
-        const reserved = new Set(['explore', 'reels', 'direct', 'accounts', 'stories', 'p', 'tv', 'reel', 'challenge', 'legal', 'about', 'developer']);
-        const links = Array.from(document.querySelectorAll('a[href]'));
-        for (const a of links) {
-            const href = a.getAttribute('href') || '';
-            const parts = href.split('/').filter(Boolean);
-            if (parts.length === 1 && !reserved.has(parts[0]) && /^[A-Za-z0-9._]{1,30}$/.test(parts[0])) {
-                if (a.querySelector('img, svg, span')) {
-                    return parts[0];
-                }
-            }
-        }
-        const html = document.documentElement.innerHTML;
-        const m = html.match(/"username":"([A-Za-z0-9._]{1,30})"/);
-        return m ? m[1] : null;
-        """
-        return await evaluate(script) as? String
+        await callBridge("detectViewerUsername()") as? String
     }
 
     // MARK: Requests made as the page
@@ -230,40 +217,21 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     func request(_ path: String, method: String = "GET", body: String? = nil) async throws -> Response {
         guard await waitUntilReady(timeout: Self.readinessTimeout) else { throw ClientError.notReady }
 
-        let script = """
-        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
-        const claim = sessionStorage.getItem('www-claim-v2') || '0';
-        const headers = {
-            'X-IG-App-ID': appID,
-            'X-CSRFToken': csrf,
-            'X-Requested-With': 'XMLHttpRequest',
-            'X-ASBD-ID': '129477',
-            'X-IG-WWW-Claim': claim,
-            'X-Instagram-AJAX': '1'
-        };
-        const options = { method: method, credentials: 'include', headers: headers };
-        if (body !== null) {
-            headers['Content-Type'] = 'application/x-www-form-urlencoded';
-            options.body = body;
-        }
-        const response = await fetch(path, options);
-        return JSON.stringify({ status: response.status, body: await response.text() });
-        """
-
         let arguments: [String: Any] = [
             "path": path,
             "method": method,
             "body": body ?? NSNull(),
             "appID": Self.appID
         ]
+        let call = "request(path, method, body, appID)"
         let raw: Any?
         do {
-            raw = try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+            raw = try await callBridgeThrowing(call, arguments: arguments)
         } catch {
             // The page may have been replacing its document mid-call; give it one more chance.
             try? await Task.sleep(for: .milliseconds(600))
             guard await waitUntilReady(timeout: Self.readinessTimeout) else { throw ClientError.notReady }
-            raw = try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+            raw = try await callBridgeThrowing(call, arguments: arguments)
         }
 
         if Self.isDebugging {
@@ -343,22 +311,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
     /// Navigates inside the single-page app without a reload, the way a click on a link would.
     @discardableResult
     func navigate(to path: String) async -> String? {
-        let script = """
-        const exact = document.querySelector('a[href="' + path + '"]');
-        if (exact) { exact.click(); return 'click'; }
-        const temp = document.createElement('a');
-        temp.href = path;
-        temp.style.display = 'none';
-        document.body.appendChild(temp);
-        temp.click();
-        temp.remove();
-        if (window.location.pathname === path) { return 'anchor'; }
-        window.history.pushState({}, '', path);
-        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-        return 'push';
-        """
-        let result = try? await webView.callAsyncJavaScript(script, arguments: ["path": path], in: nil, contentWorld: .page)
-        return result as? String
+        await callBridge("navigate(path)", arguments: ["path": path]) as? String
     }
 
     /// Opens a conversation in the hidden page by its address and confirms the page really shows it.
@@ -375,12 +328,7 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
             }
             for attempt in 0..<24 {
                 try? await Task.sleep(for: .milliseconds(250))
-                let state = await evaluate("""
-                return JSON.stringify({
-                    path: location.pathname,
-                    composer: !!document.querySelector('[contenteditable="true"][role="textbox"], div[role="main"] textarea')
-                });
-                """) as? String
+                let state = await callBridge("threadState()") as? String
                 guard let data = state?.data(using: .utf8),
                       let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let current = info["path"] as? String else { continue }
@@ -396,96 +344,37 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
 
     /// Scrolls the page to its end, which makes instagram.com load the next page of whatever grid it shows.
     func scrollToBottom() async {
-        _ = await evaluate("""
-        const main = document.scrollingElement || document.documentElement;
-        main.scrollTo(0, main.scrollHeight);
-        window.dispatchEvent(new Event('scroll'));
-        return true;
-        """)
+        _ = await callBridge("scrollToBottom()")
     }
 
     func currentPath() async -> String? {
-        await evaluate("return location.pathname;") as? String
+        await callBridge("currentPath()") as? String
     }
 
     /// Types and sends a message in the hidden page, but only if it is still showing `/direct/t/<threadPathID>/`.
     func sendDirectMessage(text: String, threadPathID: String) async -> Bool {
-        let script = """
-        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
-        const box = document.querySelector('[contenteditable="true"][role="textbox"]')
-            || document.querySelector('div[role="main"] textarea');
-        if (!box) { return false; }
-        box.focus();
-        if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-            if (setter) { setter.call(box, text); } else { box.value = text; }
-            box.dispatchEvent(new Event('input', { bubbles: true }));
-        } else {
-            document.execCommand('selectAll', false, null);
-            document.execCommand('insertText', false, text);
-            box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-        }
-        await new Promise(r => setTimeout(r, 120));
-        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
-        box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        await new Promise(r => setTimeout(r, 150));
-        const remaining = (box.innerText || box.value || '').trim();
-        if (remaining.length > 0) {
-            const send = Array.from(document.querySelectorAll('div[role="button"], button')).find(b => {
-                const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                return t === 'send' || t === 'gönder';
-            });
-            if (!send) { return false; }
-            send.click();
-        }
-        return true;
-        """
-        return (await evaluate(script, arguments: ["text": text, "expected": threadPathID]) as? Bool) ?? false
+        let result = await callBridge("sendDirectMessage(text, expected)", arguments: ["text": text, "expected": threadPathID])
+        return (result as? Bool) ?? false
     }
 
     /// Uses the hidden page's own hover controls to react to (`"react"`) or start a reply to (`"reply"`)
     /// the newest message with this text, in the thread the page is verifiably showing.
     func performMessageAction(_ action: String, messageText: String, emoji: String?, threadPathID: String) async -> Bool {
-        let script = """
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-        if (!location.pathname.includes('/direct/t/' + expected)) { return false; }
-        const main = document.querySelector('div[role="main"]') || document.body;
-        const exact = Array.from(main.querySelectorAll('div[dir="auto"], span[dir="auto"], div, span'))
-            .filter(e => (e.innerText || '').trim() === text);
-        const target = exact[exact.length - 1];
-        if (!target) { return false; }
-        const row = target.closest('div[role="row"], div[role="gridcell"]') || target.parentElement;
-        const fire = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-        for (let el = target, i = 0; el && i < 8; el = el.parentElement, i++) {
-            ['pointerover', 'mouseover', 'pointerenter', 'mouseenter', 'pointermove', 'mousemove'].forEach(t => fire(el, t));
-        }
-        await sleep(400);
-        const pattern = action === 'react' ? /react|tepki|ifade/i : /reply|yanıt/i;
-        const scope = (row && row.querySelectorAll('[aria-label]').length) ? row : main;
-        const labelled = Array.from(scope.querySelectorAll('[aria-label]'))
-            .filter(e => pattern.test(e.getAttribute('aria-label') || ''));
-        const button = labelled.map(e => e.closest('[role="button"], button') || e).pop();
-        if (!button) { return false; }
-        button.click();
-        if (action !== 'react') { return true; }
-        await sleep(500);
-        const options = Array.from(document.querySelectorAll('[role="button"], button, [role="menuitem"], [role="option"]'));
-        const option = options.find(e => {
-            const label = (e.innerText || e.getAttribute('aria-label') || (e.querySelector('img') || {}).alt || '').trim();
-            return label.startsWith(emoji);
-        });
-        if (!option) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return false; }
-        option.click();
-        return true;
-        """
-        let result = await evaluate(script, arguments: [
+        let result = await callBridge("messageAction(action, text, emoji, expected)", arguments: [
             "action": action, "text": messageText, "emoji": emoji ?? "", "expected": threadPathID
         ])
         return (result as? Bool) ?? false
     }
 
-    func evaluate(_ script: String, arguments: [String: Any] = [:]) async -> Any? {
-        try? await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+    /// Calls `window.__prismgram.<call>` in the page, (re)installing the bridge first if the page
+    /// replaced its window since the document-start injection. `call` may only refer to `arguments` keys.
+    func callBridge(_ call: String, arguments: [String: Any] = [:]) async -> Any? {
+        try? await callBridgeThrowing(call, arguments: arguments)
+    }
+
+    private func callBridgeThrowing(_ call: String, arguments: [String: Any] = [:]) async throws -> Any? {
+        let script = BridgeScripts.bridge + "\nreturn await window.__prismgram.\(call);"
+        return try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
     }
 
     fileprivate func receive(url: String, method: String, status: Int, body: String, label: String) {
@@ -496,91 +385,6 @@ final class InstagramClient: NSObject, WKNavigationDelegate {
         guard let data = try? JSONEncoder().encode(value), let text = String(data: data, encoding: .utf8) else { return "\"\"" }
         return text
     }
-
-    private static let bootSignalScript = #"""
-    (function() {
-        if (window.__igBootWatch) { return; }
-        window.__igBootWatch = true;
-        var tries = 0;
-        function booted() {
-            if (!/(?:^|;\s*)csrftoken=/.test(document.cookie)) { return false; }
-            var root = document.querySelector('[id^="mount_"]');
-            if (root && root.childElementCount > 0) { return true; }
-            return !!document.querySelector('main, nav, [role="main"]');
-        }
-        function check() {
-            if (booted()) {
-                try { window.webkit.messageHandlers.igReady.postMessage({ path: location.pathname }); } catch (_) {}
-                return;
-            }
-            if (++tries < 200) { setTimeout(check, 100); }
-        }
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', check);
-        } else {
-            check();
-        }
-    })();
-    """#
-
-    private static let networkTapScript = #"""
-    (function() {
-        if (window.__igTapInstalled) { return; }
-        window.__igTapInstalled = true;
-        window.__igTapPattern = new RegExp('/api/|/graphql');
-
-        function forward(url, method, status, body, label) {
-            try {
-                window.webkit.messageHandlers.igTap.postMessage({ url: url, method: method, status: status, body: body, label: label || '' });
-            } catch (_) {}
-        }
-        function labelFor(requestBody) {
-            try {
-                const text = requestBody instanceof URLSearchParams ? requestBody.toString() : (typeof requestBody === 'string' ? requestBody : '');
-                const params = new URLSearchParams(text);
-                const name = params.get('fb_api_req_friendly_name') || '';
-                const doc = params.get('doc_id') || '';
-                return name || doc ? name + ' #' + doc : '';
-            } catch (_) { return ''; }
-        }
-        function wanted(url) {
-            return window.__igTapPattern && window.__igTapPattern.test(url);
-        }
-
-        const originalFetch = window.fetch;
-        window.fetch = async function(input, init) {
-            const response = await originalFetch.apply(this, arguments);
-            try {
-                const url = typeof input === 'string' ? input : (input && input.url) || '';
-                if (wanted(url)) {
-                    const method = (init && init.method) || (input && input.method) || 'GET';
-                    const label = labelFor(init && init.body);
-                    response.clone().text().then(function(text) { forward(url, method, response.status, text, label); });
-                }
-            } catch (_) {}
-            return response;
-        };
-
-        const originalOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url) {
-            this.__igURL = String(url);
-            this.__igMethod = method;
-            return originalOpen.apply(this, arguments);
-        };
-        const originalSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.send = function(requestBody) {
-            this.__igLabel = labelFor(requestBody);
-            this.addEventListener('load', function() {
-                try {
-                    if (wanted(this.__igURL) && (this.responseType === '' || this.responseType === 'text')) {
-                        forward(this.__igURL, this.__igMethod, this.status, this.responseText, this.__igLabel);
-                    }
-                } catch (_) {}
-            });
-            return originalSend.apply(this, arguments);
-        };
-    })();
-    """#
 }
 
 final class NetworkTapProxy: NSObject, WKScriptMessageHandler {
@@ -593,9 +397,11 @@ final class NetworkTapProxy: NSObject, WKScriptMessageHandler {
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "igReady" {
-            let path = ((message.body as? NSDictionary)?["path"] as? String) ?? "?"
+            let info = message.body as? NSDictionary
+            let path = (info?["path"] as? String) ?? "?"
+            let version = (info?["bridge"] as? NSNumber)?.intValue ?? 0
             Task { @MainActor [weak client] in
-                client?.appDidBoot(path: path)
+                client?.appDidBoot(path: path, bridgeVersion: version)
             }
             return
         }

@@ -38,8 +38,8 @@ Known problems this plan fixes:
 
 ## Ground rules
 
-- **Build must pass before every commit:** `swift build 2>&1 | tail -20`. Never commit a broken
-  build. (Release app: `scripts/build-app.sh`, not required per commit.)
+- **Build must pass before every commit:** `swift build 2>&1 | tail -20`, and when you touch
+  JavaScript, `scripts/check-bridge-js.sh`. Never commit a broken build. (Release app: `scripts/build-app.sh`, not required per commit.)
 - **Small commits, one task (or sub-step) per commit.** In the same commit: tick the checkbox
   below and add a line to the progress log. If you stop mid-task, commit what builds and write
   precisely what is left in the log ("NEXT: ...").
@@ -76,13 +76,13 @@ Do them in order; each depends on the previous ones.
       `prepare()` (keep a short fallback timeout so nothing hangs).
 
 ### T3 — One JS bridge object
-- [ ] Create `Sources/BridgeScripts.swift` holding all JS as static strings. Install at
+- [x] Create `Sources/BridgeScripts.swift` holding all JS as static strings. Install at
       document start a `window.__prismgram` object with `request`, `navigate`, `scrollToBottom`,
       `currentPath`, `threadState`, `sendDirectMessage`, `messageAction`, `detectViewerUsername`.
-- [ ] Make `InstagramClient` methods thin calls like
+- [x] Make `InstagramClient` methods thin calls like
       `callAsyncJavaScript("return await window.__prismgram.request(path, method, body)")`.
       Re-install the object if missing (page replaced) before calling.
-- [ ] Add `window.__prismgram.version` and log it in debug mode.
+- [x] Add `window.__prismgram.version` and log it in debug mode.
 
 ### T4 — Read constants from the page
 - [ ] In the bridge, resolve `X-IG-App-ID` and `X-ASBD-ID` from the page (config/scripts,
@@ -121,3 +121,4 @@ Append newest at the bottom: `YYYY-MM-DD HH:MM — <agent> — <task> — <what 
 - 2026-10-23 11:05 — Antigravity — setup — Plan written; baseline `swift build` passes. NEXT: T1.
 - 2026-10-23 11:06 — Antigravity — T1 — `InstagramClient.withPage` (FIFO, non-reentrant) wraps story fallback, inbox, open/send/react/reply, profile open and section/scroll loads; stale profile tokens are rechecked after acquiring. Manual check: open a profile while a DM is sending; both should complete. NEXT: T2.
 - 2026-10-23 11:07 — Antigravity — T2 — Readiness = `didFinish` && `igReady` (`bootSignalScript`), with a 3 s grace fallback after `didFinish` so a changed markup never stalls requests; removed the blind 1.5 s sleep. Manual check: `PRISMGRAM_DEBUG=1` should print `page booted at /` on launch. NEXT: T3.
+- 2026-10-23 11:09 — Antigravity — T3 — All page JS moved to `BridgeScripts.swift` (`bridge`, `bootSignal`, `networkTap`); `InstagramClient` calls `window.__prismgram.*` via `callBridge`, which prepends the idempotent installer. Added `scripts/check-bridge-js.sh`. Page-reported bridge version is logged on boot. Manual check: in Web Inspector `await __prismgram.currentPath()` works. NEXT: T4.
